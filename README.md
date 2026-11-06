@@ -244,7 +244,8 @@ utilized node with a `NoSchedule` taint
 (`compaction.descheduler.openshift.io/sealed=true`) so the scheduler cannot
 place migrated VMs back onto it. The compactor seals at most one node per
 descheduler cycle, only in `Automatic` mode, never seals a node that still hosts
-pods with local storage, and pauses once only two ready KubeVirt nodes remain.
+pods with local storage, and pauses once only the configured number of ready
+KubeVirt nodes remain (`devMinCompactionReadyNodes`, default 2).
 It does **not** delete machines: once a sealed node is empty, removal is up to
 the Machine API, the cluster autoscaler, or an operator.
 
@@ -303,6 +304,7 @@ the `profileCustomizations` field:
 | `devLowNodeUtilizationThresholds` | `string` | Sets experimental thresholds for the [LowNodeUtilization](https://github.com/kubernetes-sigs/descheduler#lownodeutilization) strategy of the `LifecycleAndUtilization` profile in the following ratios: `Low` for 10%:30%, `Medium` for 20%:50%, `High` for 40%:70%|
 |`devEnableEvictionsInBackground`|`bool`| Enables descheduler's EvictionsInBackground alpha feature. The EvictionsInBackground alpha feature is a subject to change. Currently provided as an experimental feature.|
 | `devHighNodeUtilizationThresholds` | `string` | Sets thresholds for the [HighNodeUtilization](https://github.com/kubernetes-sigs/descheduler#highnodeutilization) strategy of the `CompactAndScale` and `KubeVirtCompactAndScale` profiles in the following ratios: `Minimal` for 10%, `Modest` for 20%, `Moderate` for 30%. Currently provided as an experimental feature.|
+| `devMinCompactionReadyNodes` | `int32` | Sets the minimum number of schedulable KubeVirt nodes the node compactor must leave available before it stops sealing nodes for removal, for the `KubeVirtCompactAndScale` profile. Defaults to `2`. Raising it keeps more capacity in reserve; setting it to `1` allows draining down to a single node. |
 |`devActualUtilizationProfile`|`string`| Sets a profile that gets translated into a predefined prometheus query |
 | `devDeviationThresholds` | `string` | Have the thresholds be based on the average utilization. Thresholds signify the distance from the average node utilization. An AsymmetricDeviationThreshold will force all nodes below the average to be considered as underutilized to help rebalancing overutilized outliers. Supported settings: `Low`: 10%:10%, `Medium`: 20%:20%, `High`: 30%:30%, `AsymmetricLow`: 0%:10%, `AsymmetricMedium`: 0%:20%, `AsymmetricHigh`: 0%:30% |
 | `devMigrationCooldown` | `duration` | Sets the base cooldown period for the `KubevirtMigrationAware` plugin of the `KubeVirtRelieveAndMigrate` profile. After a VM migration completes, the plugin will not evict that VM again for at least this duration (subject to exponential backoff). Only applicable to the `KubeVirtRelieveAndMigrate` and `KubeVirtCompactAndScale` profiles. |

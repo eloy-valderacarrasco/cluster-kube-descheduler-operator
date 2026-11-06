@@ -155,6 +155,15 @@ properties:
               Only applicable for the KubeVirtRelieveAndMigrate profile.
             format: duration
             type: string
+          devMinCompactionReadyNodes:
+            description: |-
+              devMinCompactionReadyNodes is the minimum number of schedulable KubeVirt
+              nodes the node compactor must leave available before it stops sealing
+              nodes. Only applicable for the KubeVirtCompactAndScale profile.
+              Defaults to 2 when unset.
+            format: int32
+            minimum: 1
+            type: integer
           namespaces:
             description: |-
               Namespaces overrides included and excluded namespaces while keeping

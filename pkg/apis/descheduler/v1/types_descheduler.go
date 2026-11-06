@@ -149,6 +149,13 @@ type ProfileCustomizations struct {
 	// Only applicable for the KubeVirtRelieveAndMigrate profile.
 	// +kubebuilder:validation:Format=duration
 	DevMigrationHistoryWindow *metav1.Duration `json:"devMigrationHistoryWindow,omitempty"`
+
+	// devMinCompactionReadyNodes is the minimum number of schedulable KubeVirt
+	// nodes the node compactor must leave available before it stops sealing
+	// nodes. Only applicable for the KubeVirtCompactAndScale profile.
+	// Defaults to 2 when unset.
+	// +kubebuilder:validation:Minimum=1
+	DevMinCompactionReadyNodes *int32 `json:"devMinCompactionReadyNodes,omitempty"`
 }
 
 type LowNodeUtilizationThresholdsType string

@@ -54,6 +54,11 @@ type ProfileCustomizationsApplyConfiguration struct {
 	// devMigrationHistoryWindow configures the migration history window for the KubevirtMigrationAware plugin.
 	// Only applicable for the KubeVirtRelieveAndMigrate profile.
 	DevMigrationHistoryWindow *metav1.Duration `json:"devMigrationHistoryWindow,omitempty"`
+	// devMinCompactionReadyNodes is the minimum number of schedulable KubeVirt
+	// nodes the node compactor must leave available before it stops sealing
+	// nodes. Only applicable for the KubeVirtCompactAndScale profile.
+	// Defaults to 2 when unset.
+	DevMinCompactionReadyNodes *int32 `json:"devMinCompactionReadyNodes,omitempty"`
 }
 
 // ProfileCustomizationsApplyConfiguration constructs a declarative configuration of the ProfileCustomizations type for use with
@@ -163,5 +168,13 @@ func (b *ProfileCustomizationsApplyConfiguration) WithDevMaxMigrationCooldown(va
 // If called multiple times, the DevMigrationHistoryWindow field is set to the value of the last call.
 func (b *ProfileCustomizationsApplyConfiguration) WithDevMigrationHistoryWindow(value metav1.Duration) *ProfileCustomizationsApplyConfiguration {
 	b.DevMigrationHistoryWindow = &value
+	return b
+}
+
+// WithDevMinCompactionReadyNodes sets the DevMinCompactionReadyNodes field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DevMinCompactionReadyNodes field is set to the value of the last call.
+func (b *ProfileCustomizationsApplyConfiguration) WithDevMinCompactionReadyNodes(value int32) *ProfileCustomizationsApplyConfiguration {
+	b.DevMinCompactionReadyNodes = &value
 	return b
 }

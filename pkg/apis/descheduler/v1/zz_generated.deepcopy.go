@@ -221,6 +221,11 @@ func (in *ProfileCustomizations) DeepCopyInto(out *ProfileCustomizations) {
 		*out = new(metav1.Duration)
 		**out = **in
 	}
+	if in.DevMinCompactionReadyNodes != nil {
+		in, out := &in.DevMinCompactionReadyNodes, &out.DevMinCompactionReadyNodes
+		*out = new(int32)
+		**out = **in
+	}
 	return
 }
 

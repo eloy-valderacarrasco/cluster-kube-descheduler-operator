@@ -870,8 +870,142 @@ func TestReconcileCompactionSealsOneNodeAtATime(t *testing.T) {
 	if len(sealed) > 4 {
 		t.Fatalf("sealed more nodes than the floor allows: %v", sealed)
 	}
-	if len(nodeNames)-len(sealed) < minCompactionReadyNodes {
-		t.Fatalf("compaction went below the ready-node floor: %d ready, floor %d", len(nodeNames)-len(sealed), minCompactionReadyNodes)
+	if len(nodeNames)-len(sealed) < defaultMinCompactionReadyNodes {
+		t.Fatalf("compaction went below the ready-node floor: %d ready, floor %d", len(nodeNames)-len(sealed), defaultMinCompactionReadyNodes)
+	}
+}
+
+// TestReconcileCompactionRespectsConfiguredFloor proves that the floor comes
+// from profileCustomizations.devMinCompactionReadyNodes rather than the
+// built-in default: on 6 nodes a floor of f must converge on exactly 6-f seals.
+func TestReconcileCompactionRespectsConfiguredFloor(t *testing.T) {
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed building scheme for the fake client: %v", err)
+	}
+	if err := deschedulerv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed building scheme for the fake client: %v", err)
+	}
+
+	podIndexer := func(rawObj client.Object) []string {
+		pod := rawObj.(*corev1.Pod)
+		if pod.Spec.NodeName == "" {
+			return nil
+		}
+		return []string{pod.Spec.NodeName}
+	}
+
+	pvcVolume := corev1.Volume{
+		Name: "disk",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "vm-disk"},
+		},
+	}
+
+	const nodeCount = 6
+
+	for _, floor := range []int32{1, 2, 4} {
+		t.Run(fmt.Sprintf("floor=%d", floor), func(t *testing.T) {
+			kubedescheduler := deschedulerv1.KubeDescheduler{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: operatorclient.OperatorNamespace,
+					Name:      operatorclient.OperatorConfigName,
+				},
+				Spec: deschedulerv1.KubeDeschedulerSpec{
+					DeschedulingIntervalSeconds: pointer.Int32(30),
+					Mode:                        deschedulerv1.Automatic,
+					ProfileCustomizations: &deschedulerv1.ProfileCustomizations{
+						DevMinCompactionReadyNodes: pointer.Int32(floor),
+					},
+				},
+			}
+
+			nodeNames := []string{}
+			objects := []client.Object{&kubedescheduler}
+			for i := 1; i <= nodeCount; i++ {
+				name := fmt.Sprintf("node%d", i)
+				nodeNames = append(nodeNames, name)
+				objects = append(objects, buildCompactionNode(name, "8", "16Gi", 110))
+				// Keep every node well below the 20% packing threshold, with
+				// node1 the emptiest so the ordering is deterministic.
+				objects = append(objects, buildCompactionPod(fmt.Sprintf("p%d", i), name, fmt.Sprintf("%dm", i*10), fmt.Sprintf("%dMi", i*10), pvcVolume))
+			}
+
+			// A fresh client per floor: the client accumulates seals across
+			// passes, so reusing it would leak the previous floor's state.
+			cl := fake.NewClientBuilder().
+				WithObjects(objects...).
+				WithScheme(scheme).
+				WithIndex(&corev1.Pod{}, "spec.nodeName", podIndexer).
+				Build()
+
+			st := softTainter{
+				client:                 cl,
+				resyncPeriod:           60 * time.Second,
+				policyConfigFile:       path.Join(getTestFilesLocation(t), "policyWithKubeVirtCompactAndScale.yaml"),
+				nodeUtilizationFactory: (&MockNodeUtilization{}).newNodeUtilizationFactory,
+			}
+
+			// Each pass seals at most one node and stops once
+			// ready <= floor, so convergence needs nodeCount-floor+1 passes.
+			for pass := 1; pass <= int(nodeCount-floor)+1; pass++ {
+				before := len(countSealedNodes(t, ctx, cl, nodeNames))
+				if _, err := st.Reconcile(ctx, reconcile.Request{}); err != nil {
+					t.Fatalf("pass %d: unexpected error: %v", pass, err)
+				}
+				after := countSealedNodes(t, ctx, cl, nodeNames)
+				if len(after)-before > 1 {
+					t.Fatalf("pass %d: more than one node sealed: %v -> %v", pass, before, after)
+				}
+			}
+
+			sealed := countSealedNodes(t, ctx, cl, nodeNames)
+			if len(sealed) != int(nodeCount-floor) {
+				t.Fatalf("expected exactly %d sealed nodes with floor %d, got %d: %v", nodeCount-floor, floor, len(sealed), sealed)
+			}
+			if len(nodeNames)-len(sealed) < int(floor) {
+				t.Fatalf("compaction went below the ready-node floor: %d ready, floor %d", len(nodeNames)-len(sealed), floor)
+			}
+		})
+	}
+}
+
+func TestResolveMinCompactionReadyNodes(t *testing.T) {
+	tests := []struct {
+		name string
+		pc   *deschedulerv1.ProfileCustomizations
+		want int32
+	}{
+		{
+			name: "nil ProfileCustomizations falls back to the default",
+			pc:   nil,
+			want: defaultMinCompactionReadyNodes,
+		},
+		{
+			name: "unset field falls back to the default",
+			pc:   &deschedulerv1.ProfileCustomizations{},
+			want: defaultMinCompactionReadyNodes,
+		},
+		{
+			name: "explicit floor of 1 is used as-is",
+			pc:   &deschedulerv1.ProfileCustomizations{DevMinCompactionReadyNodes: pointer.Int32(1)},
+			want: 1,
+		},
+		{
+			name: "explicit floor of 7 is used as-is",
+			pc:   &deschedulerv1.ProfileCustomizations{DevMinCompactionReadyNodes: pointer.Int32(7)},
+			want: 7,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveMinCompactionReadyNodes(tc.pc); got != tc.want {
+				t.Errorf("resolveMinCompactionReadyNodes() = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
