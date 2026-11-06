@@ -23,5 +23,6 @@ Profiles can be customized through the `ProfileCustomizations` field. New custom
 - **LongLifecycle** - Handle cluster lifecycle over a long term
 - **CompactAndScale** - Evict pods to enable the same workload to run on a smaller set of nodes
 - **KubeVirtRelieveAndMigrate** - Evict pods from high-cost nodes to relieve overall expenses while considering workload migration
+- **KubeVirtCompactAndScale** - Evict workload from underutilized nodes so the same VMs run on fewer nodes, sealing drained nodes for removal while considering live migration
 
-**Important:** The `KubeVirtRelieveAndMigrate` profile is currently used exclusively for [CNV (Container-native virtualization)](https://www.redhat.com/en/topics/containers/what-is-container-native-virtualization) use cases and is not intended for ordinary workloads.
+**Important:** The `KubeVirtRelieveAndMigrate` and `KubeVirtCompactAndScale` profiles are currently used exclusively for [CNV (Container-native virtualization)](https://www.redhat.com/en/topics/containers/what-is-container-native-virtualization) use cases and are not intended for ordinary workloads.

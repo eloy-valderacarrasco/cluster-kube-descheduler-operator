@@ -42,6 +42,7 @@ import (
 const (
 	baseConf                                           = "base"
 	kubeVirtRelieveAndMigrateConf                      = "devKubeVirtRelieveAndMigrate"
+	kubeVirtCompactAndScaleConf                        = "kubeVirtCompactAndScale"
 	kubeVirtLabelKey                                   = "kubevirt.io/schedulable"
 	kubeVirtLabelValue                                 = "true"
 	workersLabelSelector                               = "node-role.kubernetes.io/worker="
@@ -65,6 +66,7 @@ const (
 var operatorConfigsAppliers = map[string]func(context.Context, *deschclient.Clientset) error{
 	baseConf:                      operatorConfigsApplier("assets/07_descheduler-operator.cr.yaml"),
 	kubeVirtRelieveAndMigrateConf: operatorConfigsApplier("assets/07_descheduler-operator.cr.devKubeVirtRelieveAndMigrate.yaml"),
+	kubeVirtCompactAndScaleConf:   operatorConfigsApplier("assets/07_descheduler-operator.cr.kubeVirtCompactAndScale.yaml"),
 }
 
 func operatorConfigsApplier(path string) func(context.Context, *deschclient.Clientset) error {
