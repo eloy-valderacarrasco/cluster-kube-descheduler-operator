@@ -56,9 +56,10 @@ const (
 	SealedNodeTaintKey   = "compaction.descheduler.openshift.io/sealed"
 	SealedNodeTaintValue = "true"
 
-	// minCompactionReadyNodes is the hard floor of schedulable KubeVirt nodes
-	// below which the compactor will never seal another node.
-	minCompactionReadyNodes = 2
+	// defaultMinCompactionReadyNodes is the fallback floor of schedulable
+	// KubeVirt nodes when the CR does not set
+	// profileCustomizations.devMinCompactionReadyNodes.
+	defaultMinCompactionReadyNodes = 2
 )
 
 var (
@@ -70,6 +71,10 @@ type softTainterArgs struct {
 	thresholds             api.ResourceThresholds
 	targetThresholds       api.ResourceThresholds
 	mode                   desv1.Mode
+
+	// minCompactionReadyNodes is the floor resolved from the CR, defaulting to
+	// defaultMinCompactionReadyNodes.
+	minCompactionReadyNodes int32
 }
 
 type softTainter struct {
@@ -180,10 +185,11 @@ func (st *softTainter) Reconcile(ctx context.Context, request reconcile.Request)
 				return reconcile.Result{}, fmt.Errorf("profile %q is enabled but has no %q plugin config", desv1.KubeVirtCompactAndScale, nodeutilization.HighNodeUtilizationPluginName)
 			}
 			st.args = &softTainterArgs{
-				useDeviationThresholds: false, // HighNodeUtilization has no deviation mode
-				thresholds:             hnuargs.Thresholds,
-				targetThresholds:       nil, // HighNodeUtilization has no target thresholds
-				mode:                   des.Spec.Mode,
+				useDeviationThresholds:  false, // HighNodeUtilization has no deviation mode
+				thresholds:              hnuargs.Thresholds,
+				targetThresholds:        nil, // HighNodeUtilization has no target thresholds
+				mode:                    des.Spec.Mode,
+				minCompactionReadyNodes: resolveMinCompactionReadyNodes(des.Spec.ProfileCustomizations),
 			}
 			// Predictive mode is a dry run: sealing a node removes real
 			// capacity, so it must never happen outside Automatic mode. This
@@ -605,6 +611,16 @@ func totalUsageValue(usage api.ReferencedResourceList) int64 {
 	return total
 }
 
+// resolveMinCompactionReadyNodes returns the configured compaction floor, or the
+// default when the CR does not set it. A value below 1 is rejected at the API
+// level, so anything non-nil here is usable as-is.
+func resolveMinCompactionReadyNodes(pc *desv1.ProfileCustomizations) int32 {
+	if pc != nil && pc.DevMinCompactionReadyNodes != nil {
+		return *pc.DevMinCompactionReadyNodes
+	}
+	return defaultMinCompactionReadyNodes
+}
+
 // reconcileCompaction seals at most one underutilized, drainable KubeVirt node
 // per invocation, and unseals nodes that are no longer candidates.
 func (st *softTainter) reconcileCompaction(ctx context.Context, nodes []*corev1.Node) error {
@@ -633,8 +649,11 @@ func (st *softTainter) reconcileCompaction(ctx context.Context, nodes []*corev1.
 	//    of the compaction already performed and are awaiting machine removal;
 	//    unsealing them here would restart the compaction on the next pass and
 	//    oscillate forever.
-	if len(ready) <= minCompactionReadyNodes {
-		log.Info("Compaction paused: not enough ready KubeVirt nodes", "ready", len(ready), "floor", minCompactionReadyNodes)
+	if int32(len(ready)+len(sealed)) <= st.args.minCompactionReadyNodes {
+		log.V(1).Info("Compaction: the configured floor is not below the number of KubeVirt nodes, so no node can ever be sealed", "nodes", len(ready)+len(sealed), "floor", st.args.minCompactionReadyNodes)
+	}
+	if int32(len(ready)) <= st.args.minCompactionReadyNodes {
+		log.Info("Compaction paused: not enough ready KubeVirt nodes", "ready", len(ready), "floor", st.args.minCompactionReadyNodes)
 		return nil
 	}
 
