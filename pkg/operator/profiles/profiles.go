@@ -36,6 +36,20 @@ func hasKubeVirtRelieveAndMigrateProfile(profiles []deschedulerv1.DeschedulerPro
 	return slices.Contains(profiles, deschedulerv1.KubeVirtRelieveAndMigrate) || slices.Contains(profiles, deschedulerv1.DevKubeVirtRelieveAndMigrate)
 }
 
+// hasKubeVirtCompactAndScaleProfile returns true when the KubeVirt compaction
+// profile is enabled. This profile relies on requested resources, not on
+// Prometheus metrics, so it must not be mixed into the Prometheus predicate.
+func hasKubeVirtCompactAndScaleProfile(profiles []deschedulerv1.DeschedulerProfile) bool {
+	return slices.Contains(profiles, deschedulerv1.KubeVirtCompactAndScale)
+}
+
+// hasKubeVirtProfile returns true when any KubeVirt-aware profile is enabled.
+// Use this for decisions that apply to both profiles, such as deploying the
+// KubeVirt sidecar components or enabling EvictionsInBackground.
+func hasKubeVirtProfile(profiles []deschedulerv1.DeschedulerProfile) bool {
+	return hasKubeVirtRelieveAndMigrateProfile(profiles) || hasKubeVirtCompactAndScaleProfile(profiles)
+}
+
 func BuildDeschedulingPolicy(descheduler *deschedulerv1.KubeDescheduler, protectedNamespaces []string, prometheusHost string) (*v1alpha2.DeschedulerPolicy, error) {
 	// override the included/excluded namespace
 	excludedNamespaces := protectedNamespaces
@@ -112,6 +126,10 @@ func BuildDeschedulingPolicy(descheduler *deschedulerv1.KubeDescheduler, protect
 			kubeVirtShedulable := kubeVirtShedulableLabelSelector
 			policy.NodeSelector = &kubeVirtShedulable
 			profile, err = kubeVirtRelieveAndMigrateProfile(descheduler.Spec.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces)
+		case deschedulerv1.KubeVirtCompactAndScale:
+			kubeVirtSchedulable := kubeVirtShedulableLabelSelector
+			policy.NodeSelector = &kubeVirtSchedulable
+			profile, err = kubeVirtCompactAndScaleProfile(descheduler.Spec.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces)
 		default:
 			err = fmt.Errorf("Profile %q not recognized", profileName)
 		}
@@ -634,6 +652,121 @@ func kubeVirtRelieveAndMigrateProfile(profileCustomizations *deschedulerv1.Profi
 	return profile, nil
 }
 
+func kubeVirtCompactAndScaleProfile(profileCustomizations *deschedulerv1.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces []string) (*v1alpha2.DeschedulerProfile, error) {
+	profile := &v1alpha2.DeschedulerProfile{
+		Name: string(deschedulerv1.KubeVirtCompactAndScale),
+		PluginConfigs: []v1alpha2.PluginConfig{
+			{
+				Name: nodeutilization.HighNodeUtilizationPluginName,
+				Args: runtime.RawExtension{
+					Object: &nodeutilization.HighNodeUtilizationArgs{
+						Thresholds: deschedulerapi.ResourceThresholds{
+							v1.ResourceCPU:    20,
+							v1.ResourceMemory: 20,
+							v1.ResourcePods:   20,
+						},
+					},
+				},
+			},
+			{
+				Name: defaultevictor.PluginName,
+				Args: runtime.RawExtension{
+					Object: &defaultevictor.DefaultEvictorArgs{
+						// VMs on shared storage can live-migrate, so PVC pods are
+						// evictable. Pods with local storage cannot migrate; evicting
+						// them would restart the VM instead of moving it.
+						IgnorePvcPods:         false,
+						EvictLocalStoragePods: false,
+						NoEvictionPolicy:      defaultevictor.MandatoryNoEvictionPolicy,
+						NodeFit:               true,
+					},
+				},
+			},
+			{
+				Name: kubevirtMigrationAwarePluginName,
+				Args: runtime.RawExtension{Raw: []byte("{}")},
+			},
+		},
+		Plugins: v1alpha2.Plugins{
+			Filter: v1alpha2.PluginSet{
+				Enabled: []string{
+					defaultevictor.PluginName,
+					kubevirtMigrationAwarePluginName,
+				},
+			},
+			PreEvictionFilter: v1alpha2.PluginSet{
+				Enabled: []string{
+					// DefaultEvictor must be here for nodeFit to take effect (see
+					// "Excerpt 5" in plans/001-*.md).
+					defaultevictor.PluginName,
+					kubevirtMigrationAwarePluginName,
+				},
+			},
+			Balance: v1alpha2.PluginSet{
+				Enabled: []string{
+					nodeutilization.HighNodeUtilizationPluginName,
+				},
+			},
+		},
+	}
+
+	// exclude openshift namespaces from descheduling
+	if len(includedNamespaces) > 0 || len(excludedNamespaces) > 0 {
+		if len(includedNamespaces) > 0 {
+			klog.Warning("HighNodeUtilization is enabled, however it does not support namespace inclusion. Namespace inclusion will only be considered by other strategies.")
+		}
+		if len(excludedNamespaces) > 0 {
+			profile.PluginConfigs[0].Args.Object.(*nodeutilization.HighNodeUtilizationArgs).EvictableNamespaces = &deschedulerapi.Namespaces{
+				Exclude: excludedNamespaces,
+			}
+		}
+	}
+
+	if profileCustomizations == nil {
+		return profile, nil
+	}
+
+	// Reuse the existing compaction threshold customization.
+	if profileCustomizations.DevHighNodeUtilizationThresholds != nil {
+		args := profile.PluginConfigs[0].Args.Object.(*nodeutilization.HighNodeUtilizationArgs)
+		switch *profileCustomizations.DevHighNodeUtilizationThresholds {
+		case deschedulerv1.CompactMinimalThreshold:
+			args.Thresholds[v1.ResourceCPU] = 10
+			args.Thresholds[v1.ResourceMemory] = 10
+			args.Thresholds[v1.ResourcePods] = 10
+		case deschedulerv1.CompactModestThreshold, "":
+			args.Thresholds[v1.ResourceCPU] = 20
+			args.Thresholds[v1.ResourceMemory] = 20
+			args.Thresholds[v1.ResourcePods] = 20
+		case deschedulerv1.CompactModerateThreshold:
+			args.Thresholds[v1.ResourceCPU] = 30
+			args.Thresholds[v1.ResourceMemory] = 30
+			args.Thresholds[v1.ResourcePods] = 30
+		default:
+			return nil, fmt.Errorf("unknown Descheduler HighNodeUtilization threshold %v, only 'Minimal', 'Modest' and 'Moderate' are supported", *profileCustomizations.DevHighNodeUtilizationThresholds)
+		}
+	}
+
+	// Reuse the existing migration cooldown customizations.
+	var parts []string
+	if profileCustomizations.DevMigrationCooldown != nil {
+		parts = append(parts, fmt.Sprintf(`"migrationCooldown":%q`, profileCustomizations.DevMigrationCooldown.Duration.String()))
+	}
+	if profileCustomizations.DevMaxMigrationCooldown != nil {
+		parts = append(parts, fmt.Sprintf(`"maxMigrationCooldown":%q`, profileCustomizations.DevMaxMigrationCooldown.Duration.String()))
+	}
+	if profileCustomizations.DevMigrationHistoryWindow != nil {
+		parts = append(parts, fmt.Sprintf(`"migrationHistoryWindow":%q`, profileCustomizations.DevMigrationHistoryWindow.Duration.String()))
+	}
+	profile.PluginConfigs[2].Args = runtime.RawExtension{Raw: []byte("{" + strings.Join(parts, ",") + "}")}
+
+	if err := defaultEvictorOverrides(profileCustomizations, &profile.PluginConfigs[1]); err != nil {
+		return nil, err
+	}
+
+	return profile, nil
+}
+
 func longLifecycleProfile(profileCustomizations *deschedulerv1.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces []string, ignorePVCPods, evictLocalStoragePods bool) (*v1alpha2.DeschedulerProfile, error) {
 	profile, err := lifecycleAndUtilizationProfile(profileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces, ignorePVCPods, evictLocalStoragePods)
 	if err != nil {
@@ -750,7 +883,7 @@ func setEvictionsLimits(descheduler *deschedulerv1.KubeDescheduler, policy *v1al
 		return
 	}
 
-	if hasKubeVirtRelieveAndMigrateProfile(descheduler.Spec.Profiles) {
+	if hasKubeVirtProfile(descheduler.Spec.Profiles) {
 		policy.MaxNoOfPodsToEvictTotal = utilptr.To[uint](uint(defaultKVParallelMigrationsPerCluster))
 		policy.MaxNoOfPodsToEvictPerNode = utilptr.To[uint](uint(defaultKVParallelOutboundMigrationsPerNode))
 	}

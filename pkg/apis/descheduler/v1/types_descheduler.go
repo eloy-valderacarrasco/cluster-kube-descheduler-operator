@@ -33,7 +33,7 @@ type KubeDeschedulerSpec struct {
 	// DevKubeVirtRelieveAndMigrate is deprecated in 4.20, remove in 4.22+
 
 	// Profiles sets which descheduler strategy profiles are enabled
-	// +kubebuilder:validation:MaxItems=11
+	// +kubebuilder:validation:MaxItems=12
 	// +kubebuilder:validation:XValidation:rule="self.all(p, self.filter(x, x == p).size() == 1)",message="duplicate profiles are not allowed"
 	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'DevPreviewLongLifecycle') && self.exists(p, p == 'LifecycleAndUtilization'))",message="cannot declare DevPreviewLongLifecycle and LifecycleAndUtilization profiles simultaneously"
 	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'LongLifecycle') && self.exists(p, p == 'LifecycleAndUtilization'))",message="cannot declare LongLifecycle and LifecycleAndUtilization profiles simultaneously"
@@ -51,6 +51,13 @@ type KubeDeschedulerSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'CompactAndScale') && self.exists(p, p == 'DevKubeVirtRelieveAndMigrate'))",message="cannot declare CompactAndScale and DevKubeVirtRelieveAndMigrate profiles simultaneously"
 	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'CompactAndScale') && self.exists(p, p == 'KubeVirtRelieveAndMigrate'))",message="cannot declare CompactAndScale and KubeVirtRelieveAndMigrate profiles simultaneously"
 	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'CompactAndScale') && self.exists(p, p == 'TopologyAndDuplicates'))",message="cannot declare CompactAndScale and TopologyAndDuplicates profiles simultaneously"
+	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'KubeVirtCompactAndScale') && self.exists(p, p == 'KubeVirtRelieveAndMigrate'))",message="cannot declare KubeVirtCompactAndScale and KubeVirtRelieveAndMigrate profiles simultaneously"
+	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'KubeVirtCompactAndScale') && self.exists(p, p == 'DevKubeVirtRelieveAndMigrate'))",message="cannot declare KubeVirtCompactAndScale and DevKubeVirtRelieveAndMigrate profiles simultaneously"
+	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'KubeVirtCompactAndScale') && self.exists(p, p == 'CompactAndScale'))",message="cannot declare KubeVirtCompactAndScale and CompactAndScale profiles simultaneously"
+	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'KubeVirtCompactAndScale') && self.exists(p, p == 'LifecycleAndUtilization'))",message="cannot declare KubeVirtCompactAndScale and LifecycleAndUtilization profiles simultaneously"
+	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'KubeVirtCompactAndScale') && self.exists(p, p == 'LongLifecycle'))",message="cannot declare KubeVirtCompactAndScale and LongLifecycle profiles simultaneously"
+	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'KubeVirtCompactAndScale') && self.exists(p, p == 'DevPreviewLongLifecycle'))",message="cannot declare KubeVirtCompactAndScale and DevPreviewLongLifecycle profiles simultaneously"
+	// +kubebuilder:validation:XValidation:rule="!(self.exists(p, p == 'KubeVirtCompactAndScale') && self.exists(p, p == 'TopologyAndDuplicates'))",message="cannot declare KubeVirtCompactAndScale and TopologyAndDuplicates profiles simultaneously"
 	Profiles []DeschedulerProfile `json:"profiles"`
 
 	// DeschedulingIntervalSeconds is the number of seconds between descheduler runs
@@ -236,7 +243,7 @@ type Namespaces struct {
 
 // DeschedulerProfile allows configuring the enabled strategy profiles for the descheduler
 // it allows multiple profiles to be enabled at once, which will have cumulative effects on the cluster.
-// +kubebuilder:validation:Enum=AffinityAndTaints;TopologyAndDuplicates;LifecycleAndUtilization;DevPreviewLongLifecycle;LongLifecycle;SoftTopologyAndDuplicates;EvictPodsWithLocalStorage;EvictPodsWithPVC;CompactAndScale;DevKubeVirtRelieveAndMigrate;KubeVirtRelieveAndMigrate
+// +kubebuilder:validation:Enum=AffinityAndTaints;TopologyAndDuplicates;LifecycleAndUtilization;DevPreviewLongLifecycle;LongLifecycle;SoftTopologyAndDuplicates;EvictPodsWithLocalStorage;EvictPodsWithPVC;CompactAndScale;DevKubeVirtRelieveAndMigrate;KubeVirtRelieveAndMigrate;KubeVirtCompactAndScale
 type DeschedulerProfile string
 
 var (
@@ -273,6 +280,11 @@ var (
 
 	// KubeVirtRelieveAndMigrate seeks to evict pods from high-cost nodes to relieve overall expenses while considering workload migration.
 	KubeVirtRelieveAndMigrate DeschedulerProfile = "KubeVirtRelieveAndMigrate"
+
+	// KubeVirtCompactAndScale seeks to evict pods from underutilized nodes so
+	// the same workload runs on fewer nodes, while considering KubeVirt live
+	// migration.
+	KubeVirtCompactAndScale DeschedulerProfile = "KubeVirtCompactAndScale"
 
 	// DevKubeVirtRelieveAndMigrate seeks to evict pods from high-cost nodes to relieve overall expenses while considering workload migration.
 	// Deprecated: use KubeVirtRelieveAndMigrate instead

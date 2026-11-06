@@ -890,6 +890,14 @@ func (c *TargetConfigReconciler) manageConfigMap(descheduler *deschedulerv1.Kube
 			if !psiEnabled {
 				return nil, true, fmt.Errorf("profile %v can only be used when PSI metrics are enabled for the worker nodes", profileName)
 			}
+		case deschedulerv1.KubeVirtCompactAndScale:
+			kvDeployed, kverr := c.isKubeVirtDeployed()
+			if kverr != nil {
+				return nil, false, kverr
+			}
+			if !kvDeployed {
+				return nil, true, fmt.Errorf("profile %v can only be used when KubeVirt is properly deployed", profileName)
+			}
 		}
 	}
 
@@ -1106,7 +1114,7 @@ func (c *TargetConfigReconciler) manageDeschedulerDeployment(descheduler *desche
 
 	featureGates := []string{}
 	evictionsInBackgroundEnabled := descheduler.Spec.ProfileCustomizations != nil && descheduler.Spec.ProfileCustomizations.DevEnableEvictionsInBackground
-	evictionsInBackgroundEnabled = evictionsInBackgroundEnabled || hasKubeVirtRelieveAndMigrateProfile(descheduler.Spec.Profiles)
+	evictionsInBackgroundEnabled = evictionsInBackgroundEnabled || hasKubeVirtProfile(descheduler.Spec.Profiles)
 	if evictionsInBackgroundEnabled {
 		featureGates = append(featureGates, "EvictionsInBackground=true")
 	}
@@ -1256,6 +1264,14 @@ func (c *TargetConfigReconciler) isPSIenabled() (bool, error) {
 
 func hasKubeVirtRelieveAndMigrateProfile(profiles []deschedulerv1.DeschedulerProfile) bool {
 	return slices.Contains(profiles, deschedulerv1.KubeVirtRelieveAndMigrate) || slices.Contains(profiles, deschedulerv1.DevKubeVirtRelieveAndMigrate)
+}
+
+func hasKubeVirtCompactAndScaleProfile(profiles []deschedulerv1.DeschedulerProfile) bool {
+	return slices.Contains(profiles, deschedulerv1.KubeVirtCompactAndScale)
+}
+
+func hasKubeVirtProfile(profiles []deschedulerv1.DeschedulerProfile) bool {
+	return hasKubeVirtRelieveAndMigrateProfile(profiles) || hasKubeVirtCompactAndScaleProfile(profiles)
 }
 
 func (c *TargetConfigReconciler) isSoftTainterNeeded(descheduler *deschedulerv1.KubeDescheduler) (bool, error) {
