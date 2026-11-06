@@ -45,6 +45,18 @@ const (
 	OverUtilizedSoftTaintValue          = "true"
 	AppropriatelyUtilizedSoftTaintKey   = "nodeutilization.descheduler.openshift.io/appropriate"
 	AppropriatelyUtilizedSoftTaintValue = "true"
+
+	// SealedNodeTaintKey marks a node that the compactor has chosen for removal.
+	// It uses the NoSchedule effect (not PreferNoSchedule) so the scheduler is
+	// forced to place migrated VMs elsewhere. The key stays inside the
+	// "descheduler.openshift.io" namespace allowed by the soft-tainter
+	// ValidatingAdmissionPolicy.
+	SealedNodeTaintKey   = "compaction.descheduler.openshift.io/sealed"
+	SealedNodeTaintValue = "true"
+
+	// minCompactionReadyNodes is the hard floor of schedulable KubeVirt nodes
+	// below which the compactor will never seal another node.
+	minCompactionReadyNodes = 2
 )
 
 var (
@@ -510,7 +522,7 @@ func (st *softTainter) addTaint(ctx context.Context, node *corev1.Node, k, v str
 		return err
 	}
 	if !taints.TaintExists(rNode.Spec.Taints, &corev1.Taint{Key: k, Value: v, Effect: corev1.TaintEffectPreferNoSchedule}) {
-		updated, err := AddOrUpdateSoftTaint(ctx, st.client, rNode, k, v)
+		updated, err := AddOrUpdateTaint(ctx, st.client, rNode, k, v, corev1.TaintEffectPreferNoSchedule)
 		if err != nil {
 			log.Error(err, "Failed adding soft taint to node, check RBAC", "node", rNode.Name, "taint", k)
 			return err
@@ -531,7 +543,7 @@ func (st *softTainter) dropTaint(ctx context.Context, node *corev1.Node, k, v st
 		return err
 	}
 	if taints.TaintExists(rNode.Spec.Taints, &corev1.Taint{Key: k, Value: v, Effect: corev1.TaintEffectPreferNoSchedule}) {
-		removed, err := RemoveSoftTaint(ctx, st.client, rNode, k)
+		removed, err := RemoveTaint(ctx, st.client, rNode, k)
 		if err != nil {
 			log.Error(err, "Failed removing soft taint from node, check RBAC", "node", rNode.Name, "taint", k)
 			return err

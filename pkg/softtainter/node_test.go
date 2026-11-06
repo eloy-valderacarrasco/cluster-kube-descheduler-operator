@@ -167,7 +167,7 @@ func TestAddOrUpdateSoftTaint(t *testing.T) {
 
 			cl := fake.NewClientBuilder().WithObjects(node).WithScheme(scheme).Build()
 
-			removed, err := AddOrUpdateSoftTaint(ctx, cl, node, testKey, testValue)
+			removed, err := AddOrUpdateTaint(ctx, cl, node, testKey, testValue, v1.TaintEffectPreferNoSchedule)
 			if removed != tc.expectedUpdated {
 				t.Errorf("Test %#v failed, unexepcted updated", tc.description)
 			}
@@ -305,7 +305,7 @@ func TestRemoveSoftTaint(t *testing.T) {
 			node.Spec.Taints = tc.nodeTaints
 			cl := fake.NewClientBuilder().WithObjects(node).WithScheme(scheme).Build()
 
-			removed, err := RemoveSoftTaint(ctx, cl, node, testKey)
+			removed, err := RemoveTaint(ctx, cl, node, testKey)
 			if removed != tc.expectedRemoved {
 				t.Errorf("Test %#v failed, unexepcted removed", tc.description)
 			}

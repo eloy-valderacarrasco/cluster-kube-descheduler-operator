@@ -11,9 +11,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// AddOrUpdateSoftTaint add a soft taint to the node. If taint was added/updated into node, it'll trigger a patch operation
-// to update the node; otherwise, no API calls. Return error if any.
-func AddOrUpdateSoftTaint(ctx context.Context, c client.Client, node *v1.Node, taintKey, taintValue string) (bool, error) {
+// AddOrUpdateTaint add a taint with the given effect to the node. If taint was added/updated into node, it'll trigger a
+// patch operation to update the node; otherwise, no API calls. Return error if any.
+func AddOrUpdateTaint(ctx context.Context, c client.Client, node *v1.Node, taintKey, taintValue string, effect v1.TaintEffect) (bool, error) {
 	newNode := &v1.Node{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(node), newNode); err != nil {
 		return false, err
@@ -28,8 +28,8 @@ func AddOrUpdateSoftTaint(ctx context.Context, c client.Client, node *v1.Node, t
 		if taint.Key != taintKey {
 			newTaints = append(newTaints, taint)
 		} else {
-			if taint.Value != taintValue || taint.Effect != v1.TaintEffectPreferNoSchedule {
-				newTaints = append(newTaints, v1.Taint{Key: taint.Key, Value: taintValue, Effect: v1.TaintEffectPreferNoSchedule})
+			if taint.Value != taintValue || taint.Effect != effect {
+				newTaints = append(newTaints, v1.Taint{Key: taint.Key, Value: taintValue, Effect: effect})
 				updated = true
 			} else {
 				found = true
@@ -37,7 +37,7 @@ func AddOrUpdateSoftTaint(ctx context.Context, c client.Client, node *v1.Node, t
 		}
 	}
 	if !updated && !found {
-		newTaints = append(newTaints, v1.Taint{Key: taintKey, Value: taintValue, Effect: v1.TaintEffectPreferNoSchedule})
+		newTaints = append(newTaints, v1.Taint{Key: taintKey, Value: taintValue, Effect: effect})
 		updated = true
 	}
 
@@ -52,9 +52,9 @@ func AddOrUpdateSoftTaint(ctx context.Context, c client.Client, node *v1.Node, t
 	return false, nil
 }
 
-// RemoveSoftTaint delete a soft taint from the node. If taint was found on the node, it'll trigger a patch operation
+// RemoveTaint delete a taint from the node. If taint was found on the node, it'll trigger a patch operation
 // to update the node; otherwise, no API calls. Return error if any.
-func RemoveSoftTaint(ctx context.Context, c client.Client, node *v1.Node, taintKey string) (bool, error) {
+func RemoveTaint(ctx context.Context, c client.Client, node *v1.Node, taintKey string) (bool, error) {
 	newNode := &v1.Node{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(node), newNode); err != nil {
 		return false, err
