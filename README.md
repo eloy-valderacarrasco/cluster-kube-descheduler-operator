@@ -105,6 +105,7 @@ The following profiles are currently provided:
 * [`LongLifecycle`](#LongLifecycle)
 * [`CompactAndScale`](#compactandscale-techpreview)
 * [`KubeVirtRelieveAndMigrate`](#kubevirtrelieveandmigrate)
+* [`KubeVirtCompactAndScale`](#kubevirtcompactandscale)
 * [`EvictPodsWithPVC`](#EvictPodsWithPVC)
 * [`EvictPodsWithLocalStorage`](#EvictPodsWithLocalStorage)
 
@@ -204,6 +205,79 @@ backoff bounded by a configurable maximum, to prevent cascading re-evictions of 
 The cooldown parameters can be tuned with the `devMigrationCooldown`, `devMaxMigrationCooldown`, and
 `devMigrationHistoryWindow` profile customizations.
 
+### KubeVirtCompactAndScale
+
+This profile seeks to run the same set of virtual machines on fewer nodes, so
+that the surplus nodes can be removed and their cost reclaimed. It evicts
+workload from the *least* utilized KubeVirt nodes and relies on live migration
+to move the VMs elsewhere.
+
+This profile enables the [`HighNodeUtilization`](https://github.com/kubernetes-sigs/descheduler/#highnodeutilization)
+strategy together with the `KubevirtMigrationAware` plugin, which blocks
+eviction of a VM while a live migration for it is already in progress and
+applies an adaptive, exponentially backed-off cooldown after each migration
+completes. The `DefaultEvictor` is configured with `nodeFit`, so a VM is only
+evicted when the scheduler has somewhere valid to place it.
+
+Unlike `CompactAndScale`, pods with local storage are **not** evictable: a VM
+backed by local storage cannot live-migrate, so evicting it would restart the
+workload rather than move it.
+
+This profile sets the same nodeSelector (`kubevirt.io/schedulable=true`) as
+`KubeVirtRelieveAndMigrate`, limiting its action to nodes that are schedulable
+for KubeVirt.
+
+Unlike `KubeVirtRelieveAndMigrate`, this profile does **not** require
+[PSI](https://docs.kernel.org/accounting/psi.html) metrics or Prometheus: the
+packing decision is based on resource requests, not on measured load. The
+`KubevirtMigrationAware` cooldown works from the VMI object's own
+`status.migrationState`, so no metrics provider is involved.
+
+By default, this profile configures the descheduler to restrict the maximum
+number of overall parallel evictions to 5 and the maximum number of evictions
+per node to 2, aligning with KubeVirt defaults around concurrent live
+migrations. Those two values can be customized with `evictionLimits.total` and
+`evictionLimits.node` parameters.
+
+This profile also deploys the node compactor, which marks a drained, least
+utilized node with a `NoSchedule` taint
+(`compaction.descheduler.openshift.io/sealed=true`) so the scheduler cannot
+place migrated VMs back onto it. The compactor seals at most one node per
+descheduler cycle, only in `Automatic` mode, never seals a node that still hosts
+pods with local storage, and pauses once only two ready KubeVirt nodes remain.
+It does **not** delete machines: once a sealed node is empty, removal is up to
+the Machine API, the cluster autoscaler, or an operator.
+
+The profile exposes the following customizations:
+
+- `devHighNodeUtilizationThresholds`: sets the packing threshold. `Minimal`
+  (10%), `Modest` (20%, default) and `Moderate` (30%).
+- `devMigrationCooldown`, `devMaxMigrationCooldown`,
+  `devMigrationHistoryWindow`: tune the `KubevirtMigrationAware` cooldown, as
+  described for `KubeVirtRelieveAndMigrate`.
+
+> **Important — compaction of an already-idle cluster.** The underlying
+> `HighNodeUtilization` strategy does nothing when *every* node is below the
+> packing threshold ("All nodes are underutilized, nothing to do here"). On a
+> cluster where all nodes are lightly loaded, no VMs will be moved until
+> `devHighNodeUtilizationThresholds` is lowered to `Minimal`.
+
+```yaml
+apiVersion: operator.openshift.io/v1
+kind: KubeDescheduler
+metadata:
+  name: cluster
+  namespace: openshift-kube-descheduler-operator
+spec:
+  managementState: Managed
+  deschedulingIntervalSeconds: 3600
+  mode: Automatic
+  profiles:
+  - KubeVirtCompactAndScale
+  profileCustomizations:
+    devHighNodeUtilizationThresholds: Minimal
+```
+
 ### EvictPodsWithPVC
 By default, the operator prevents pods with PVCs from being evicted. Enabling this
 profile in combination with any of the above profiles allows pods with PVCs to be
@@ -228,12 +302,12 @@ the `profileCustomizations` field:
 |`namespaces.included`, `namespaces.excluded`|`[]string`| Sets the included/excluded namespaces for all strategies (included namespaces are not allowed to include protected namespaces which consist of `kube-system`, `hypershift` and all `openshift-` prefixed namespaces)|
 | `devLowNodeUtilizationThresholds` | `string` | Sets experimental thresholds for the [LowNodeUtilization](https://github.com/kubernetes-sigs/descheduler#lownodeutilization) strategy of the `LifecycleAndUtilization` profile in the following ratios: `Low` for 10%:30%, `Medium` for 20%:50%, `High` for 40%:70%|
 |`devEnableEvictionsInBackground`|`bool`| Enables descheduler's EvictionsInBackground alpha feature. The EvictionsInBackground alpha feature is a subject to change. Currently provided as an experimental feature.|
-| `devHighNodeUtilizationThresholds` | `string` | Sets thresholds for the [HighNodeUtilization](https://github.com/kubernetes-sigs/descheduler#highnodeutilization) strategy of the `CompactAndScale` profile in the following ratios: `Minimal` for 10%, `Modest` for 20%, `Moderate` for 30%. Currently provided as an experimental feature.|
+| `devHighNodeUtilizationThresholds` | `string` | Sets thresholds for the [HighNodeUtilization](https://github.com/kubernetes-sigs/descheduler#highnodeutilization) strategy of the `CompactAndScale` and `KubeVirtCompactAndScale` profiles in the following ratios: `Minimal` for 10%, `Modest` for 20%, `Moderate` for 30%. Currently provided as an experimental feature.|
 |`devActualUtilizationProfile`|`string`| Sets a profile that gets translated into a predefined prometheus query |
 | `devDeviationThresholds` | `string` | Have the thresholds be based on the average utilization. Thresholds signify the distance from the average node utilization. An AsymmetricDeviationThreshold will force all nodes below the average to be considered as underutilized to help rebalancing overutilized outliers. Supported settings: `Low`: 10%:10%, `Medium`: 20%:20%, `High`: 30%:30%, `AsymmetricLow`: 0%:10%, `AsymmetricMedium`: 0%:20%, `AsymmetricHigh`: 0%:30% |
-| `devMigrationCooldown` | `duration` | Sets the base cooldown period for the `KubevirtMigrationAware` plugin of the `KubeVirtRelieveAndMigrate` profile. After a VM migration completes, the plugin will not evict that VM again for at least this duration (subject to exponential backoff). Only applicable to the `KubeVirtRelieveAndMigrate` profile. |
-| `devMaxMigrationCooldown` | `duration` | Sets the upper bound on the exponential backoff cooldown for the `KubevirtMigrationAware` plugin of the `KubeVirtRelieveAndMigrate` profile. Regardless of how many migrations have occurred within the history window, the cooldown will not exceed this value. Only applicable to the `KubeVirtRelieveAndMigrate` profile. |
-| `devMigrationHistoryWindow` | `duration` | Sets the sliding time window used by the `KubevirtMigrationAware` plugin to count past migrations when computing the exponential backoff cooldown. Only applicable to the `KubeVirtRelieveAndMigrate` profile. |
+| `devMigrationCooldown` | `duration` | Sets the base cooldown period for the `KubevirtMigrationAware` plugin of the `KubeVirtRelieveAndMigrate` profile. After a VM migration completes, the plugin will not evict that VM again for at least this duration (subject to exponential backoff). Only applicable to the `KubeVirtRelieveAndMigrate` and `KubeVirtCompactAndScale` profiles. |
+| `devMaxMigrationCooldown` | `duration` | Sets the upper bound on the exponential backoff cooldown for the `KubevirtMigrationAware` plugin of the `KubeVirtRelieveAndMigrate` profile. Regardless of how many migrations have occurred within the history window, the cooldown will not exceed this value. Only applicable to the `KubeVirtRelieveAndMigrate` and `KubeVirtCompactAndScale` profiles. |
+| `devMigrationHistoryWindow` | `duration` | Sets the sliding time window used by the `KubevirtMigrationAware` plugin to count past migrations when computing the exponential backoff cooldown. Only applicable to the `KubeVirtRelieveAndMigrate` and `KubeVirtCompactAndScale` profiles. |
 
 ## Prometheus query profiles
 The operator provides the following profiles:

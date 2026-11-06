@@ -289,6 +289,11 @@ var _ = g.Describe("[OTP][Operator][Serial] Descheduler Operator Functionality",
 			testLongLifecycleProfile(g.GinkgoTB(), ctx, kubeClient, deschClient)
 		})
 
+		g.It("should validate KubeVirtCompactAndScale policy shape [Disruptive][Slow][Timeout:5m]", func() {
+			g.By("Testing KubeVirtCompactAndScale policy shape")
+			testKubeVirtCompactAndScalePolicy(g.GinkgoTB(), ctx, kubeClient, deschClient)
+		})
+
 		g.It("should validate NodeAffinity strategy [Disruptive][Slow][Timeout:5m]", func() {
 			g.By("Testing NodeAffinity strategy")
 			testNodeAffinityStrategy(g.GinkgoTB(), ctx, kubeClient, deschClient)
@@ -570,6 +575,22 @@ func testProfileConflicts(t testing.TB, ctx context.Context, kubeClient *k8sclie
 	o.Expect(err.Error()).To(o.ContainSubstring("cannot declare CompactAndScale and TopologyAndDuplicates profiles simultaneously"))
 	klog.Infof("CompactAndScale + TopologyAndDuplicates conflict correctly rejected")
 
+	// Test 5: KubeVirtCompactAndScale + KubeVirtRelieveAndMigrate should be rejected
+	g.By("Testing KubeVirtCompactAndScale + KubeVirtRelieveAndMigrate conflict")
+	err = createKubeDeschedulerWithProfiles(ctx, deschClient, "test-conflict-5",
+		[]string{"KubeVirtCompactAndScale", "KubeVirtRelieveAndMigrate"})
+	o.Expect(err).To(o.HaveOccurred(), "Expected KubeDescheduler creation to fail with conflicting profiles")
+	o.Expect(err.Error()).To(o.ContainSubstring("cannot declare KubeVirtCompactAndScale and KubeVirtRelieveAndMigrate profiles simultaneously"))
+	klog.Infof("KubeVirtCompactAndScale + KubeVirtRelieveAndMigrate conflict correctly rejected")
+
+	// Test 6: KubeVirtCompactAndScale + LifecycleAndUtilization should be rejected
+	g.By("Testing KubeVirtCompactAndScale + LifecycleAndUtilization conflict")
+	err = createKubeDeschedulerWithProfiles(ctx, deschClient, "test-conflict-6",
+		[]string{"KubeVirtCompactAndScale", "LifecycleAndUtilization"})
+	o.Expect(err).To(o.HaveOccurred(), "Expected KubeDescheduler creation to fail with conflicting profiles")
+	o.Expect(err.Error()).To(o.ContainSubstring("cannot declare KubeVirtCompactAndScale and LifecycleAndUtilization profiles simultaneously"))
+	klog.Infof("KubeVirtCompactAndScale + LifecycleAndUtilization conflict correctly rejected")
+
 	klog.Infof("Profile conflict validation completed successfully")
 }
 
@@ -580,6 +601,38 @@ func testLongLifecycleProfile(t testing.TB, ctx context.Context, kubeClient *k8s
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	klog.Infof("LongLifecycle profile validated successfully")
+}
+
+// testKubeVirtCompactAndScalePolicy validates the policy the operator renders for
+// KubeVirtCompactAndScale. createAndValidateKubeDeschedulerCR diffs the whole policy
+// structurally against profiles.BuildDeschedulingPolicy, so any drift (dropped
+// KubevirtMigrationAware, missing nodeFit, unexpected metricsUtilization, changed
+// threshold or eviction limit) fails here.
+func testKubeVirtCompactAndScalePolicy(t testing.TB, ctx context.Context, kubeClient *k8sclient.Clientset, deschClient *deschclient.Clientset) {
+	// The operator rejects this profile unless it detects KubeVirt through the
+	// kubevirt.io/schedulable=true node label, so mock one and clean up after.
+	g.By("Labelling worker nodes to mock a KubeVirt deployment")
+	o.Expect(applyKubeVirtNodeLabel(ctx, kubeClient)).To(o.Succeed())
+	defer func() {
+		if derr := dropKubeVirtNodeLabel(ctx, kubeClient); derr != nil {
+			klog.Errorf("Failed reverting KubeVirt node label: %v", derr)
+		}
+	}()
+	nodes, err := kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: kubeVirtLabelKey + "=" + kubeVirtLabelValue})
+	o.Expect(err).NotTo(o.HaveOccurred())
+	if len(nodes.Items) == 0 {
+		g.Skip("Skipping: no worker node could be labelled as schedulable for KubeVirt")
+	}
+
+	err = createAndValidateKubeDeschedulerCR(ctx, kubeClient, deschClient, buildKubeDescheduler(func(kd *descv1.KubeDescheduler) {
+		kd.Spec.Profiles = []descv1.DeschedulerProfile{descv1.KubeVirtCompactAndScale}
+		kd.Spec.ProfileCustomizations = &descv1.ProfileCustomizations{
+			DevHighNodeUtilizationThresholds: &descv1.CompactMinimalThreshold,
+			Namespaces:                       descv1.Namespaces{Excluded: []string{"e2e-testdescheduling"}},
+		}
+	}), "KubeVirtCompactAndScale profile")
+	o.Expect(err).NotTo(o.HaveOccurred())
+	klog.Infof("KubeVirtCompactAndScale profile validated successfully")
 }
 
 // testRelatedImages tests that CSV has relatedImages defined correctly

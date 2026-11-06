@@ -103,6 +103,8 @@ spec:
     * LifecycleAndUtilization
     * LongLifecycle
     * CompactAndScale
+    * KubeVirtRelieveAndMigrate
+    * KubeVirtCompactAndScale
     * EvictPodsWithPVC
     * EvictPodsWithLocalStorage
 
