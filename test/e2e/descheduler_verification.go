@@ -603,77 +603,36 @@ func testLongLifecycleProfile(t testing.TB, ctx context.Context, kubeClient *k8s
 	klog.Infof("LongLifecycle profile validated successfully")
 }
 
-// testKubeVirtCompactAndScalePolicy asserts the shape of the policy rendered for
-// the KubeVirtCompactAndScale profile, so a future refactor that silently drops
-// the migration-aware plugin or nodeFit fails here instead of breaking VM
-// migrations in the field.
+// testKubeVirtCompactAndScalePolicy validates the policy the operator renders for
+// KubeVirtCompactAndScale. createAndValidateKubeDeschedulerCR diffs the whole policy
+// structurally against profiles.BuildDeschedulingPolicy, so any drift (dropped
+// KubevirtMigrationAware, missing nodeFit, unexpected metricsUtilization, changed
+// threshold or eviction limit) fails here.
 func testKubeVirtCompactAndScalePolicy(t testing.TB, ctx context.Context, kubeClient *k8sclient.Clientset, deschClient *deschclient.Clientset) {
-	// The operator only accepts this profile when KubeVirt is "deployed", which
-	// it detects through the kubevirt.io/schedulable=true node label.
+	// The operator rejects this profile unless it detects KubeVirt through the
+	// kubevirt.io/schedulable=true node label, so mock one and clean up after.
 	g.By("Labelling worker nodes to mock a KubeVirt deployment")
-	err := applyKubeVirtNodeLabel(ctx, kubeClient)
-	o.Expect(err).NotTo(o.HaveOccurred())
+	o.Expect(applyKubeVirtNodeLabel(ctx, kubeClient)).To(o.Succeed())
 	defer func() {
 		if derr := dropKubeVirtNodeLabel(ctx, kubeClient); derr != nil {
 			klog.Errorf("Failed reverting KubeVirt node label: %v", derr)
 		}
 	}()
-
-	// The operator only renders this profile when it finds at least one node
-	// labelled as schedulable for KubeVirt.
-	kvNodes, err := kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		LabelSelector: kubeVirtLabelKey + "=" + kubeVirtLabelValue,
-	})
+	nodes, err := kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: kubeVirtLabelKey + "=" + kubeVirtLabelValue})
 	o.Expect(err).NotTo(o.HaveOccurred())
-	if len(kvNodes.Items) == 0 {
+	if len(nodes.Items) == 0 {
 		g.Skip("Skipping: no worker node could be labelled as schedulable for KubeVirt")
 	}
 
-	kubeDescheduler := buildKubeDescheduler(func(kd *descv1.KubeDescheduler) {
+	err = createAndValidateKubeDeschedulerCR(ctx, kubeClient, deschClient, buildKubeDescheduler(func(kd *descv1.KubeDescheduler) {
 		kd.Spec.Profiles = []descv1.DeschedulerProfile{descv1.KubeVirtCompactAndScale}
 		kd.Spec.ProfileCustomizations = &descv1.ProfileCustomizations{
 			DevHighNodeUtilizationThresholds: &descv1.CompactMinimalThreshold,
-			Namespaces: descv1.Namespaces{
-				Excluded: []string{"e2e-testdescheduling"},
-			},
+			Namespaces:                       descv1.Namespaces{Excluded: []string{"e2e-testdescheduling"}},
 		}
-	})
-
-	g.By("Creating KubeDescheduler CR with KubeVirtCompactAndScale profile")
-	err = createKubeDeschedulerAndWait(ctx, kubeClient, deschClient, kubeDescheduler)
+	}), "KubeVirtCompactAndScale profile")
 	o.Expect(err).NotTo(o.HaveOccurred())
-
-	g.By("Reading the rendered descheduler policy.yaml")
-	var policyYAML string
-	err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
-		cm, cerr := kubeClient.CoreV1().ConfigMaps(operatorclient.OperatorNamespace).Get(ctx, operatorclient.OperatorConfigName, metav1.GetOptions{})
-		if cerr != nil {
-			klog.V(2).Infof("Failed to get descheduler ConfigMap: %v", cerr)
-			return false, nil
-		}
-		data, ok := cm.Data["policy.yaml"]
-		if !ok || data == "" {
-			klog.V(2).Infof("Descheduler ConfigMap does not contain a rendered policy.yaml yet")
-			return false, nil
-		}
-		policyYAML = data
-		return true, nil
-	})
-	o.Expect(err).NotTo(o.HaveOccurred())
-	o.Expect(policyYAML).NotTo(o.BeEmpty())
-	klog.V(4).Infof("Rendered policy.yaml:\n%s", policyYAML)
-
-	g.By("Validating the KubeVirtCompactAndScale policy shape")
-	o.Expect(policyYAML).To(o.ContainSubstring("name: KubeVirtCompactAndScale"),
-		"Rendered policy should contain the KubeVirtCompactAndScale profile")
-	o.Expect(policyYAML).To(o.ContainSubstring("KubevirtMigrationAware"),
-		"Rendered policy should enable the KubevirtMigrationAware plugin")
-	o.Expect(policyYAML).To(o.ContainSubstring("nodeFit: true"),
-		"Rendered policy should configure DefaultEvictor with nodeFit")
-	o.Expect(policyYAML).NotTo(o.ContainSubstring("metricsUtilization"),
-		"Rendered policy should not depend on metrics-based utilization")
-
-	klog.Infof("KubeVirtCompactAndScale policy shape validated successfully")
+	klog.Infof("KubeVirtCompactAndScale profile validated successfully")
 }
 
 // testRelatedImages tests that CSV has relatedImages defined correctly
