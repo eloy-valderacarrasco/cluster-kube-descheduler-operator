@@ -221,8 +221,9 @@ spec:
                       - CompactAndScale
                       - DevKubeVirtRelieveAndMigrate
                       - KubeVirtRelieveAndMigrate
+                      - KubeVirtCompactAndScale
                     type: string
-                  maxItems: 11
+                  maxItems: 12
                   type: array
                   x-kubernetes-validations:
                     - message: duplicate profiles are not allowed
@@ -259,6 +260,20 @@ spec:
                       rule: '!(self.exists(p, p == ''CompactAndScale'') && self.exists(p, p == ''KubeVirtRelieveAndMigrate''))'
                     - message: cannot declare CompactAndScale and TopologyAndDuplicates profiles simultaneously
                       rule: '!(self.exists(p, p == ''CompactAndScale'') && self.exists(p, p == ''TopologyAndDuplicates''))'
+                    - message: cannot declare KubeVirtCompactAndScale and KubeVirtRelieveAndMigrate profiles simultaneously
+                      rule: '!(self.exists(p, p == ''KubeVirtCompactAndScale'') && self.exists(p, p == ''KubeVirtRelieveAndMigrate''))'
+                    - message: cannot declare KubeVirtCompactAndScale and DevKubeVirtRelieveAndMigrate profiles simultaneously
+                      rule: '!(self.exists(p, p == ''KubeVirtCompactAndScale'') && self.exists(p, p == ''DevKubeVirtRelieveAndMigrate''))'
+                    - message: cannot declare KubeVirtCompactAndScale and CompactAndScale profiles simultaneously
+                      rule: '!(self.exists(p, p == ''KubeVirtCompactAndScale'') && self.exists(p, p == ''CompactAndScale''))'
+                    - message: cannot declare KubeVirtCompactAndScale and LifecycleAndUtilization profiles simultaneously
+                      rule: '!(self.exists(p, p == ''KubeVirtCompactAndScale'') && self.exists(p, p == ''LifecycleAndUtilization''))'
+                    - message: cannot declare KubeVirtCompactAndScale and LongLifecycle profiles simultaneously
+                      rule: '!(self.exists(p, p == ''KubeVirtCompactAndScale'') && self.exists(p, p == ''LongLifecycle''))'
+                    - message: cannot declare KubeVirtCompactAndScale and DevPreviewLongLifecycle profiles simultaneously
+                      rule: '!(self.exists(p, p == ''KubeVirtCompactAndScale'') && self.exists(p, p == ''DevPreviewLongLifecycle''))'
+                    - message: cannot declare KubeVirtCompactAndScale and TopologyAndDuplicates profiles simultaneously
+                      rule: '!(self.exists(p, p == ''KubeVirtCompactAndScale'') && self.exists(p, p == ''TopologyAndDuplicates''))'
                 unsupportedConfigOverrides:
                   description: |-
                     unsupportedConfigOverrides overrides the final configuration that was computed by the operator.
