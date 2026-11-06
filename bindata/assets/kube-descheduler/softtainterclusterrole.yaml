@@ -25,6 +25,17 @@ rules:
   - "list"
   - "patch"
   - "update"
+# The compactor inspects the pods assigned to a node to decide whether the node
+# can be sealed safely: pods with local storage cannot live-migrate and must not
+# be stranded. Read-only; the compactor never evicts pods.
+- apiGroups:
+  - ""
+  resources:
+  - "pods"
+  verbs:
+  - "get"
+  - "watch"
+  - "list"
 - apiGroups:
   - "operator.openshift.io"
   resources:

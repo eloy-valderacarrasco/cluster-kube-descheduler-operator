@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
@@ -1911,5 +1912,67 @@ func TestManageSoftTainterNetworkPolicyAllow(t *testing.T) {
 	_, getErr := kubeClient.NetworkingV1().NetworkPolicies(operatorclient.OperatorNamespace).Get(ctx, allowNetworkPolicySoftTainterName, metav1.GetOptions{})
 	if !errors.IsNotFound(getErr) {
 		t.Fatalf("Expected softtainter NetworkPolicy to be deleted when disabled, got: %v", getErr)
+	}
+}
+
+// TestSoftTainterClusterRoleAllowsPodReads guards a permission the node
+// compactor depends on. The compactor lists the pods assigned to a node to
+// decide whether that node can be sealed safely: pods with local storage cannot
+// live-migrate and must not be stranded on a sealed node. Without read access to
+// pods the soft-tainter cannot register its spec.nodeName cache index, so the
+// controller fails to start on exactly the compaction clusters this feature
+// targets. Compaction-only clusters do not get the cluster-monitoring-view
+// binding, so this ClusterRole is the only grant available.
+func TestSoftTainterClusterRoleAllowsPodReads(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	kubeClient := fake.NewSimpleClientset()
+	eventRecorder := events.NewInMemoryRecorder("test", clock.RealClock{})
+
+	descheduler := &deschedulerv1.KubeDescheduler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      operatorclient.OperatorConfigName,
+			Namespace: operatorclient.OperatorNamespace,
+			UID:       "test-uid",
+		},
+	}
+
+	reconciler := &TargetConfigReconciler{
+		ctx:           ctx,
+		kubeClient:    kubeClient,
+		eventRecorder: eventRecorder,
+		cache:         resourceapply.NewResourceCache(),
+	}
+
+	clusterRole, _, err := reconciler.manageSoftTainterClusterRole(descheduler, true)
+	if err != nil {
+		t.Fatalf("manageSoftTainterClusterRole failed: %v", err)
+	}
+
+	requiredVerbs := map[string]bool{"get": false, "watch": false, "list": false}
+	found := false
+	for _, rule := range clusterRole.Rules {
+		if !sets.New(rule.APIGroups...).Has("") {
+			continue
+		}
+		if !sets.New(rule.Resources...).Has("pods") {
+			continue
+		}
+		found = true
+		for _, verb := range rule.Verbs {
+			if _, ok := requiredVerbs[verb]; ok {
+				requiredVerbs[verb] = true
+			}
+		}
+	}
+
+	if !found {
+		t.Fatalf("soft-tainter ClusterRole has no rule granting access to %q; the node compactor cannot list pods to assess drainability", "pods")
+	}
+	for verb, present := range requiredVerbs {
+		if !present {
+			t.Errorf("soft-tainter ClusterRole is missing verb %q on %q", verb, "pods")
+		}
 	}
 }
