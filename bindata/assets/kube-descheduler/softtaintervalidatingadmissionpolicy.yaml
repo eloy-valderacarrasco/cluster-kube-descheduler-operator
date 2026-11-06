@@ -20,18 +20,18 @@ spec:
   variables:
     - name: "deschedulerTaintPrefix"
       expression: "'descheduler.openshift.io'"
-    - name: "deschedulerTaintEffect"
-      expression: "'PreferNoSchedule'"
+    - name: "allowedTaintEffects"
+      expression: "['PreferNoSchedule', 'NoSchedule']"
     - name: "oldNonDeschedulerTaints"
-      expression: "has(oldObject.spec.taints) ? oldObject.spec.taints.filter(t, !t.key.contains(variables.deschedulerTaintPrefix) || t.effect != variables.deschedulerTaintEffect) : []"
+      expression: "has(oldObject.spec.taints) ? oldObject.spec.taints.filter(t, !t.key.contains(variables.deschedulerTaintPrefix)) : []"
     - name: "oldTaints"
       expression: "has(oldObject.spec.taints) ? oldObject.spec.taints : []"
     - name: "newNonDeschedulerTaints"
-      expression: "has(object.spec.taints) ? object.spec.taints.filter(t, !t.key.contains(variables.deschedulerTaintPrefix) || t.effect != variables.deschedulerTaintEffect) : []"
+      expression: "has(object.spec.taints) ? object.spec.taints.filter(t, !t.key.contains(variables.deschedulerTaintPrefix)) : []"
     - name: "newTaints"
       expression: "has(object.spec.taints) ? object.spec.taints : []"
     - name: "newDeschedulerTaints"
-      expression: "has(object.spec.taints) ? object.spec.taints.filter(t, t.key.contains(variables.deschedulerTaintPrefix) && t.effect == variables.deschedulerTaintEffect) : []"
+      expression: "has(object.spec.taints) ? object.spec.taints.filter(t, t.key.contains(variables.deschedulerTaintPrefix)) : []"
   validations:
     - expression: |
         oldObject.metadata.filter(k, k != "resourceVersion" && k != "generation" && k != "managedFields").all(k, k in object.metadata) &&
@@ -49,6 +49,6 @@ spec:
     - expression: "variables.newNonDeschedulerTaints.all(nt, size(variables.oldNonDeschedulerTaints.filter(ot, nt.key==ot.key)) > 0 ? variables.oldNonDeschedulerTaints.filter(ot, nt.key==ot.key)[0].?value.orValue('') == nt.?value.orValue('') && variables.oldNonDeschedulerTaints.filter(ot, nt.key==ot.key)[0].effect == nt.effect : true)"
       messageExpression: "'User ' + string(request.userInfo.username) + ' is not allowed to update non descheduler taints'"
       reason: Forbidden
-    - expression: "variables.newDeschedulerTaints.all(t, t.effect == 'PreferNoSchedule')"
-      messageExpression: "'User ' + string(request.userInfo.username) + ' is only allowed to set taints with PreferNoSchedule effect'"
+    - expression: "variables.newDeschedulerTaints.all(t, t.effect in variables.allowedTaintEffects)"
+      messageExpression: "'User ' + string(request.userInfo.username) + ' is only allowed to set taints with the PreferNoSchedule or NoSchedule effect'"
       reason: Forbidden
