@@ -248,6 +248,14 @@ func (c TargetConfigReconciler) sync() error {
 		return err
 	}
 
+	// The Prometheus-only resources below must not be shipped to a
+	// compaction-only cluster: it never queries Prometheus, and the
+	// DeschedulerPSIDisabled alert would fire permanently there.
+	softTainterPrometheusNeeded, err := c.isSoftTainterPrometheusNeeded(descheduler)
+	if err != nil {
+		return err
+	}
+
 	if stsa, _, err := c.manageSoftTainterServiceAccount(descheduler, isSoftTainterNeeded); err != nil {
 		return err
 	} else {
@@ -358,7 +366,7 @@ func (c TargetConfigReconciler) sync() error {
 		specAnnotations["clusterrolebindings/openshift-descheduler-softtainter"] = resourceVersion
 	}
 
-	if softtainterClusterMonitoringViewClusterRoleBinding, _, err := c.manageSoftTainterClusterMonitoringViewClusterRoleBinding(descheduler, isSoftTainterNeeded); err != nil {
+	if softtainterClusterMonitoringViewClusterRoleBinding, _, err := c.manageSoftTainterClusterMonitoringViewClusterRoleBinding(descheduler, softTainterPrometheusNeeded); err != nil {
 		return err
 	} else {
 		resourceVersion := "0"
@@ -368,7 +376,7 @@ func (c TargetConfigReconciler) sync() error {
 		specAnnotations["clusterrolebindings/openshift-descheduler-operand"] = resourceVersion
 	}
 
-	if softtainterPSIAlert, _, err := c.managePSIAlert(descheduler, isSoftTainterNeeded); err != nil {
+	if softtainterPSIAlert, _, err := c.managePSIAlert(descheduler, softTainterPrometheusNeeded); err != nil {
 		return err
 	} else {
 		resourceVersion := "0"
@@ -1274,7 +1282,27 @@ func hasKubeVirtProfile(profiles []deschedulerv1.DeschedulerProfile) bool {
 	return hasKubeVirtRelieveAndMigrateProfile(profiles) || hasKubeVirtCompactAndScaleProfile(profiles)
 }
 
+// isSoftTainterPrometheusNeeded reports whether the soft-tainter needs
+// Prometheus access. Only the load-aware KubeVirtRelieveAndMigrate profile
+// consumes metrics; the compaction profile packs on requested resources.
+func (c *TargetConfigReconciler) isSoftTainterPrometheusNeeded(descheduler *deschedulerv1.KubeDescheduler) (bool, error) {
+	if !hasKubeVirtRelieveAndMigrateProfile(descheduler.Spec.Profiles) {
+		return false, nil
+	}
+	return c.isSoftTainterNeeded(descheduler)
+}
+
 func (c *TargetConfigReconciler) isSoftTainterNeeded(descheduler *deschedulerv1.KubeDescheduler) (bool, error) {
+	if hasKubeVirtCompactAndScaleProfile(descheduler.Spec.Profiles) {
+		// The compaction profile seals and drains nodes. It needs neither
+		// Prometheus nor PSI: it packs on requested resources.
+		kvDeployed, err := c.isKubeVirtDeployed()
+		if err != nil {
+			return false, err
+		}
+		return kvDeployed, nil
+	}
+
 	if hasKubeVirtRelieveAndMigrateProfile(descheduler.Spec.Profiles) {
 		kvDeployed, err := c.isKubeVirtDeployed()
 		if err != nil {
@@ -1305,6 +1333,9 @@ func (c *TargetConfigReconciler) isSoftTainterNeeded(descheduler *deschedulerv1.
 	softTaints := []*v1.Taint{
 		{Key: softtainter.AppropriatelyUtilizedSoftTaintKey, Value: softtainter.AppropriatelyUtilizedSoftTaintValue, Effect: v1.TaintEffectPreferNoSchedule},
 		{Key: softtainter.OverUtilizedSoftTaintKey, Value: softtainter.OverUtilizedSoftTaintValue, Effect: v1.TaintEffectPreferNoSchedule},
+		// A node sealed by the compaction profile must be unsealed when the
+		// profile is removed, so keep the soft-tainter deployed to clean up.
+		{Key: softtainter.SealedNodeTaintKey, Value: softtainter.SealedNodeTaintValue, Effect: v1.TaintEffectNoSchedule},
 	}
 	for _, node := range nodes {
 		for _, t := range softTaints {

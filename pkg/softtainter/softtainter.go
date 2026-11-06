@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/descheduler/pkg/framework/plugins/nodeutilization"
 	"sigs.k8s.io/descheduler/pkg/framework/plugins/nodeutilization/classifier"
 	"sigs.k8s.io/descheduler/pkg/framework/plugins/nodeutilization/normalizer"
+	desutils "sigs.k8s.io/descheduler/pkg/utils"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -82,6 +84,9 @@ type softTainter struct {
 	resyncPeriod                      time.Duration
 	policyConfigFile                  string
 	nodeUtilizationFactory            func(promapi.Client, string) NodeUtilization
+	// compactionEnabled is set on every Reconcile from the descheduler policy:
+	// it reports whether the KubeVirtCompactAndScale profile is in effect.
+	compactionEnabled bool
 }
 
 type NodeUtilization interface {
@@ -101,6 +106,10 @@ func (anu *actualNodeUtilization) NodeUsageFromPrometheusMetrics(ctx context.Con
 
 func (st *softTainter) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	logger := log.WithValues("Request.Namespace", request.Namespace, "Request.Name", request.Name)
+
+	// Reset the profile state on every pass so that removing the profile from
+	// the CR takes effect immediately.
+	st.compactionEnabled = false
 
 	des := desv1.KubeDescheduler{}
 
@@ -144,8 +153,17 @@ func (st *softTainter) Reconcile(ctx context.Context, request reconcile.Request)
 	}
 
 	var lnargs *nodeutilization.LowNodeUtilizationArgs
+	var hnuargs *nodeutilization.HighNodeUtilizationArgs
 
 	for _, p := range policy.Profiles {
+		if p.Name == string(desv1.KubeVirtCompactAndScale) {
+			st.compactionEnabled = true
+			for _, pc := range p.PluginConfigs {
+				if pc.Name == nodeutilization.HighNodeUtilizationPluginName {
+					hnuargs = pc.Args.(*nodeutilization.HighNodeUtilizationArgs)
+				}
+			}
+		}
 		if p.Name == string(desv1.KubeVirtRelieveAndMigrate) || p.Name == string(desv1.DevKubeVirtRelieveAndMigrate) {
 			for _, pc := range p.PluginConfigs {
 				if pc.Name == nodeutilization.LowNodeUtilizationPluginName {
@@ -156,6 +174,23 @@ func (st *softTainter) Reconcile(ctx context.Context, request reconcile.Request)
 	}
 
 	if lnargs == nil {
+		// No LowNodeUtilization profile: this may be a compaction cluster.
+		if st.compactionEnabled {
+			if hnuargs == nil {
+				return reconcile.Result{}, fmt.Errorf("profile %q is enabled but has no %q plugin config", desv1.KubeVirtCompactAndScale, nodeutilization.HighNodeUtilizationPluginName)
+			}
+			st.args = &softTainterArgs{
+				useDeviationThresholds: false, // HighNodeUtilization has no deviation mode
+				thresholds:             hnuargs.Thresholds,
+				targetThresholds:       nil, // HighNodeUtilization has no target thresholds
+				mode:                   des.Spec.Mode,
+			}
+			if err := st.reconcileCompaction(ctx, nodeList); err != nil {
+				logger.Error(err, "compaction reconciliation failed")
+				return reconcile.Result{}, err
+			}
+			return reconcile.Result{RequeueAfter: st.resyncPeriod}, nil
+		}
 		logger.Info("SoftTainter is disabled, cleaning up eventual leftover taints")
 		err = st.cleanAllSoftTaints(ctx, nodeList)
 		if err != nil {
@@ -370,6 +405,7 @@ func (st *softTainter) cleanAllSoftTaints(ctx context.Context, nodes []*corev1.N
 			for k, v := range map[string]string{
 				AppropriatelyUtilizedSoftTaintKey: AppropriatelyUtilizedSoftTaintValue,
 				OverUtilizedSoftTaintKey:          OverUtilizedSoftTaintValue,
+				SealedNodeTaintKey:                SealedNodeTaintValue,
 			} {
 				collectErr(st.dropTaint(ctx, node, k, v))
 			}
@@ -380,6 +416,256 @@ func (st *softTainter) cleanAllSoftTaints(ctx context.Context, nodes []*corev1.N
 	_ = g.Wait() // Ignore error since we're aggregating errors in errs
 
 	return utilerrors.NewAggregate(errs)
+}
+
+// Compaction contract:
+//   1. The compactor only *seals* (NoSchedule taint) and *drains*. It never
+//      deletes machines or drains pods itself — the descheduler profile from
+//      plan 001 performs the evictions and KubeVirt performs live migrations.
+//   2. A sealed node that reaches zero migratable pods is left sealed and
+//      empty, ready for the Machine API / cluster-autoscaler / an operator to
+//      remove. This controller does not know how to delete a machine, and must
+//      not learn: machine provisioning is a different subsystem with different
+//      failure modes.
+//   3. Unsealing is always safe and always allowed: removing the taint returns
+//      the node to service without any data movement.
+
+// nodeDrainability describes whether a node can be sealed and removed.
+type nodeDrainability struct {
+	// migratablePods counts pods that can move elsewhere: pods with PVCs
+	// (live-migratable VMs) and ordinary pods.
+	migratablePods int
+	// blockedPods counts pods that cannot move: pods with local storage,
+	// which would restart rather than migrate.
+	blockedPods int
+	// reason is a short human-readable explanation for logs and events.
+	reason string
+}
+
+// assessNodeDrainability inspects the pods currently assigned to node and
+// decides whether sealing it is safe.
+func (st *softTainter) assessNodeDrainability(ctx context.Context, node *corev1.Node) (nodeDrainability, error) {
+	result := nodeDrainability{}
+	pods := corev1.PodList{}
+	if err := st.client.List(ctx, &pods, client.MatchingFields{"spec.nodeName": node.Name}); err != nil {
+		return result, fmt.Errorf("unable to list pods on node %q: %v", node.Name, err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		// Mirror the eviction policy from plan 001: pods with local storage
+		// cannot live-migrate, so they must not be stranded on a sealed node.
+		if hasLocalStorage(pod) {
+			result.blockedPods++
+			continue
+		}
+		result.migratablePods++
+	}
+	if result.blockedPods > 0 {
+		result.reason = fmt.Sprintf("%d pod(s) with local storage cannot be migrated", result.blockedPods)
+	}
+	return result, nil
+}
+
+// hasLocalStorage reports whether the pod uses an emptyDir or hostPath volume,
+// matching the descheduler's own local-storage protection.
+func hasLocalStorage(pod *corev1.Pod) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.EmptyDir != nil || volume.HostPath != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// podsOnNode returns the pods currently assigned to node.
+func (st *softTainter) podsOnNode(ctx context.Context, nodeName string) ([]*corev1.Pod, error) {
+	podList := corev1.PodList{}
+	if err := st.client.List(ctx, &podList, client.MatchingFields{"spec.nodeName": nodeName}); err != nil {
+		return nil, fmt.Errorf("unable to list pods on node %q: %v", nodeName, err)
+	}
+	pods := make([]*corev1.Pod, 0, len(podList.Items))
+	for i := range podList.Items {
+		pods = append(pods, &podList.Items[i])
+	}
+	return pods, nil
+}
+
+// requestedUsagesForNodes returns, for every node, the sum of the pod resource
+// requests for the resources the compaction thresholds care about. Unlike the
+// LowNodeUtilization path this never consults Prometheus: HighNodeUtilization
+// packs on requested resources.
+func (st *softTainter) requestedUsagesForNodes(ctx context.Context, nodes []*corev1.Node) (map[string]api.ReferencedResourceList, error) {
+	resourceNames := getResourceNames(st.args.thresholds)
+	usages := make(map[string]api.ReferencedResourceList, len(nodes))
+	for _, node := range nodes {
+		pods, err := st.podsOnNode(ctx, node.Name)
+		if err != nil {
+			return nil, err
+		}
+		usage := api.ReferencedResourceList{}
+		for _, resourceName := range resourceNames {
+			if resourceName == corev1.ResourcePods {
+				usage[resourceName] = resource.NewQuantity(int64(len(pods)), resource.DecimalSI)
+				continue
+			}
+			total := resource.NewQuantity(0, resource.DecimalSI)
+			for _, pod := range pods {
+				quantity := desutils.GetResourceRequestQuantity(pod, resourceName)
+				total.Add(quantity)
+			}
+			usage[resourceName] = total
+		}
+		usages[node.Name] = usage
+	}
+	return usages, nil
+}
+
+// compactionCandidates returns the schedulable nodes that are below the
+// compaction packing threshold, sorted ascending by total usage: the emptiest
+// node is the best candidate to remove. Unlike LowNodeUtilization there is no
+// target threshold, so only the low span is consulted.
+func (st *softTainter) compactionCandidates(ctx context.Context, nodes []*corev1.Node) ([]*corev1.Node, error) {
+	if len(nodes) == 0 {
+		return nil, nil
+	}
+	usages, err := st.requestedUsagesForNodes(ctx, nodes)
+	if err != nil {
+		return nil, err
+	}
+	capacities := referencedResourceListForNodesCapacity(nodes)
+
+	usage, thresholds := assessNodesUsagesAndStaticThresholds(
+		usages,
+		capacities,
+		st.args.thresholds,
+		// HighNodeUtilization has no target threshold; the second span is
+		// never consulted on this path.
+		nil,
+	)
+
+	nodesMap := make(map[string]*corev1.Node, len(nodes))
+	for _, node := range nodes {
+		nodesMap[node.Name] = node
+	}
+
+	nodeGroups := classifier.Classify(
+		usage, thresholds,
+		// underutilized criteria: a node is a compaction candidate purely by
+		// being below the packing threshold, but only if it is schedulable.
+		func(nodeName string, usage, threshold api.ResourceThresholds) bool {
+			if nodeutil.IsNodeUnschedulable(nodesMap[nodeName]) {
+				return false
+			}
+			return isNodeBelowThreshold(usage, threshold)
+		},
+	)
+
+	candidates := make([]*corev1.Node, 0, len(nodeGroups[0]))
+	for nodeName := range nodeGroups[0] {
+		log.Info(
+			"Compaction: node is below the packing threshold",
+			"node", nodeName,
+			"usage", usages[nodeName],
+			"usagePercentage", normalizer.Round(usage[nodeName]),
+		)
+		candidates = append(candidates, nodesMap[nodeName])
+	}
+
+	// Sort ascending by total usage, mirroring sortNodesByUsage(nodes, true)
+	// in the descheduler's HighNodeUtilization plugin.
+	sort.Slice(candidates, func(i, j int) bool {
+		return totalUsageValue(usages[candidates[i].Name]) < totalUsageValue(usages[candidates[j].Name])
+	})
+
+	return candidates, nil
+}
+
+// totalUsageValue sums the usage quantities of a node, using milli-units for
+// CPU so that CPU and memory are not compared with wildly different scales.
+func totalUsageValue(usage api.ReferencedResourceList) int64 {
+	total := int64(0)
+	for resourceName, quantity := range usage {
+		if quantity == nil {
+			continue
+		}
+		if resourceName == corev1.ResourceCPU {
+			total += quantity.MilliValue()
+			continue
+		}
+		total += quantity.Value()
+	}
+	return total
+}
+
+// reconcileCompaction seals at most one underutilized, drainable KubeVirt node
+// per invocation, and unseals nodes that are no longer candidates.
+func (st *softTainter) reconcileCompaction(ctx context.Context, nodes []*corev1.Node) error {
+	// 1. Partition nodes into ready (schedulable, unsealed) and sealed.
+	var ready, sealed []*corev1.Node
+	for _, node := range nodes {
+		if nodeutil.IsNodeUnschedulable(node) {
+			continue
+		}
+		if taints.TaintExists(node.Spec.Taints, &corev1.Taint{Key: SealedNodeTaintKey, Value: SealedNodeTaintValue, Effect: corev1.TaintEffectNoSchedule}) {
+			sealed = append(sealed, node)
+			continue
+		}
+		ready = append(ready, node)
+	}
+
+	// 2. Never go below the floor.
+	if len(ready) <= minCompactionReadyNodes {
+		log.Info("Compaction paused: not enough ready KubeVirt nodes", "ready", len(ready), "floor", minCompactionReadyNodes)
+		return st.unsealAll(ctx, sealed)
+	}
+
+	// 3. Sort candidates by usage ascending: the emptiest node is the best
+	//    candidate to remove.
+	candidates, err := st.compactionCandidates(ctx, ready)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		log.Info("Compaction: no node below the packing threshold, nothing to seal")
+		return st.unsealAll(ctx, sealed)
+	}
+
+	// 4. Seal at most one node, and only if it is fully drainable.
+	for _, candidate := range candidates {
+		drainability, err := st.assessNodeDrainability(ctx, candidate)
+		if err != nil {
+			return err
+		}
+		if drainability.blockedPods > 0 {
+			log.Info("Compaction: skipping node", "node", candidate.Name, "reason", drainability.reason)
+			continue
+		}
+		updated, err := AddOrUpdateTaint(ctx, st.client, candidate, SealedNodeTaintKey, SealedNodeTaintValue, corev1.TaintEffectNoSchedule)
+		if err != nil {
+			return err
+		}
+		if updated {
+			log.Info("Compaction: sealed node for removal", "node", candidate.Name, "migratablePods", drainability.migratablePods)
+		}
+		return nil
+	}
+
+	log.Info("Compaction: every candidate has non-migratable pods, nothing to seal")
+	return nil
+}
+
+// unsealAll removes the sealed taint from nodes that are no longer candidates.
+func (st *softTainter) unsealAll(ctx context.Context, sealed []*corev1.Node) error {
+	for _, node := range sealed {
+		removed, err := RemoveTaint(ctx, st.client, node, SealedNodeTaintKey)
+		if err != nil {
+			return err
+		}
+		if removed {
+			log.Info("Compaction: unsealed node", "node", node.Name)
+		}
+	}
+	return nil
 }
 
 func (st *softTainter) reconcileInClusterSAToken() error {
@@ -585,6 +871,24 @@ func RegisterReconciler(mgr manager.Manager, policyConfigFile string) error {
 		return fmt.Errorf("descheduler should have an interval set and it should be greater than 0")
 	}
 	resyncPeriod := time.Duration(*des.Spec.DeschedulingIntervalSeconds) * time.Second
+
+	// The compaction path needs to list the pods assigned to a node, so index
+	// pods by spec.nodeName in the cache. This must be registered before the
+	// controller starts consuming the cache.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&corev1.Pod{},
+		"spec.nodeName",
+		func(rawObj client.Object) []string {
+			pod, ok := rawObj.(*corev1.Pod)
+			if !ok || pod.Spec.NodeName == "" {
+				return nil
+			}
+			return []string{pod.Spec.NodeName}
+		},
+	); err != nil {
+		return fmt.Errorf("unable to register spec.nodeName field index: %v", err)
+	}
 
 	// Create a new controller
 	c, err := controller.New(
