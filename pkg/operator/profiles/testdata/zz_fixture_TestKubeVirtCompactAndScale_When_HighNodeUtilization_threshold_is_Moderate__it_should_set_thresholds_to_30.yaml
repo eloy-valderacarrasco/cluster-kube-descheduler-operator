@@ -1,0 +1,52 @@
+apiVersion: descheduler/v1alpha2
+kind: DeschedulerPolicy
+maxNoOfPodsToEvictPerNode: 2
+maxNoOfPodsToEvictTotal: 5
+nodeSelector: kubevirt.io/schedulable=true
+profiles:
+- name: KubeVirtCompactAndScale
+  pluginConfig:
+  - args:
+      evictableNamespaces:
+        exclude:
+        - kube-system
+        - hypershift
+        - openshift
+        - openshift-kube-descheduler-operator
+        - openshift-kube-scheduler
+      thresholds:
+        cpu: 30
+        memory: 30
+        pods: 30
+    name: HighNodeUtilization
+  - args:
+      noEvictionPolicy: Mandatory
+      nodeFit: true
+      podProtections: {}
+    name: DefaultEvictor
+  - args: {}
+    name: KubevirtMigrationAware
+  plugins:
+    balance:
+      disabled: null
+      enabled:
+      - HighNodeUtilization
+    deschedule:
+      disabled: null
+      enabled: null
+    filter:
+      disabled: null
+      enabled:
+      - DefaultEvictor
+      - KubevirtMigrationAware
+    preevictionfilter:
+      disabled: null
+      enabled:
+      - DefaultEvictor
+      - KubevirtMigrationAware
+    presort:
+      disabled: null
+      enabled: null
+    sort:
+      disabled: null
+      enabled: null

@@ -1187,6 +1187,145 @@ func TestCompactAndScale(t *testing.T) {
 	}
 }
 
+func TestKubeVirtCompactAndScale(t *testing.T) {
+	migrationCooldown := metav1.Duration{Duration: 5 * time.Minute}
+	maxMigrationCooldown := metav1.Duration{Duration: 15 * time.Minute}
+	migrationHistoryWindow := metav1.Duration{Duration: 30 * time.Minute}
+
+	tests := []struct {
+		name             string
+		descheduler      *deschedulerv1.KubeDescheduler
+		expectError      bool
+		expectedErrorMsg string
+	}{
+		{
+			name: "When no customizations are provided, it should generate default profile",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+			}),
+		},
+		{
+			name: "When HighNodeUtilization threshold is Minimal, it should set thresholds to 10",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					DevHighNodeUtilizationThresholds: &deschedulerv1.CompactMinimalThreshold,
+				}
+			}),
+		},
+		{
+			name: "When HighNodeUtilization threshold is Moderate, it should set thresholds to 30",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					DevHighNodeUtilizationThresholds: &deschedulerv1.CompactModerateThreshold,
+				}
+			}),
+		},
+		{
+			name: "When HighNodeUtilization threshold is bogus, it should return error",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					DevHighNodeUtilizationThresholds: utilptr.To(deschedulerv1.HighNodeUtilizationThresholdsType("bogus")),
+				}
+			}),
+			expectError:      true,
+			expectedErrorMsg: "unknown Descheduler HighNodeUtilization threshold bogus, only 'Minimal', 'Modest' and 'Moderate' are supported",
+		},
+		{
+			name: "When excluded namespaces are specified, it should set namespace exclude filter",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					Namespaces: deschedulerv1.Namespaces{
+						Excluded: []string{testExcludedNamespace},
+					},
+				}
+			}),
+		},
+		{
+			name: "When included namespaces are specified, it should set namespace exclude filter",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					Namespaces: deschedulerv1.Namespaces{
+						Included: []string{testIncludedNamespace},
+					},
+				}
+			}),
+		},
+		{
+			name: "When migration cooldown settings are specified, it should configure KubevirtMigrationAware plugin",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					DevMigrationCooldown:      &migrationCooldown,
+					DevMaxMigrationCooldown:   &maxMigrationCooldown,
+					DevMigrationHistoryWindow: &migrationHistoryWindow,
+				}
+			}),
+		},
+		{
+			name: "When eviction limits are specified, it should set MaxNoOfPodsToEvict fields",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.EvictionLimits = &deschedulerv1.EvictionLimits{
+					Total: utilptr.To(int32(10)),
+					Node:  utilptr.To(int32(3)),
+				}
+			}),
+		},
+		{
+			name: "When threshold priority class name is set, it should configure priority threshold",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					ThresholdPriorityClassName: testPriorityClassName,
+				}
+			}),
+		},
+		{
+			name: "When both priority class name and value are set, it should return error",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					ThresholdPriority:          utilptr.To(int32(1000)),
+					ThresholdPriorityClassName: testPriorityClassName,
+				}
+			}),
+			expectError:      true,
+			expectedErrorMsg: "It is invalid to set both .spec.profileCustomizations.thresholdPriority and .spec.profileCustomizations.ThresholdPriorityClassName fields",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, err := BuildDeschedulingPolicy(
+				tt.descheduler,
+				protectedNamespaces,
+				"",
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.expectedErrorMsg != "" && err.Error() != tt.expectedErrorMsg {
+					t.Errorf("expected error %q, got %q", tt.expectedErrorMsg, err.Error())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			testutil.CompareWithFixture(t, policy)
+		})
+	}
+}
+
 func buildKubeDescheduler(apply func(*deschedulerv1.KubeDeschedulerSpec)) *deschedulerv1.KubeDescheduler {
 	descheduler := &deschedulerv1.KubeDescheduler{
 		ObjectMeta: metav1.ObjectMeta{

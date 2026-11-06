@@ -1534,6 +1534,11 @@ func TestCheckProfileConflicts(t *testing.T) {
 			descheduler: makeKubeDeschedulerWithProfiles(deschedulerv1.KubeVirtRelieveAndMigrate),
 			wantErr:     false,
 		},
+		{
+			name:        "Valid single profile: KubeVirtCompactAndScale",
+			descheduler: makeKubeDeschedulerWithProfiles(deschedulerv1.KubeVirtCompactAndScale),
+			wantErr:     false,
+		},
 
 		// Valid multiple profiles
 		{
@@ -1666,6 +1671,24 @@ func TestCheckProfileConflicts(t *testing.T) {
 			descheduler:    makeKubeDeschedulerWithProfiles(deschedulerv1.CompactAndScale, deschedulerv1.TopologyAndDuplicates),
 			wantErr:        true,
 			expectedErrMsg: "cannot declare CompactAndScale and TopologyAndDuplicates profiles simultaneously",
+		},
+		{
+			name:           "Conflict: KubeVirtCompactAndScale and KubeVirtRelieveAndMigrate",
+			descheduler:    makeKubeDeschedulerWithProfiles(deschedulerv1.KubeVirtCompactAndScale, deschedulerv1.KubeVirtRelieveAndMigrate),
+			wantErr:        true,
+			expectedErrMsg: "cannot declare KubeVirtCompactAndScale and KubeVirtRelieveAndMigrate profiles simultaneously",
+		},
+		{
+			name:           "Conflict: KubeVirtCompactAndScale and CompactAndScale",
+			descheduler:    makeKubeDeschedulerWithProfiles(deschedulerv1.KubeVirtCompactAndScale, deschedulerv1.CompactAndScale),
+			wantErr:        true,
+			expectedErrMsg: "cannot declare KubeVirtCompactAndScale and CompactAndScale profiles simultaneously",
+		},
+		{
+			name:           "Conflict: KubeVirtCompactAndScale and LifecycleAndUtilization",
+			descheduler:    makeKubeDeschedulerWithProfiles(deschedulerv1.KubeVirtCompactAndScale, deschedulerv1.LifecycleAndUtilization),
+			wantErr:        true,
+			expectedErrMsg: "cannot declare KubeVirtCompactAndScale and LifecycleAndUtilization profiles simultaneously",
 		},
 	}
 
