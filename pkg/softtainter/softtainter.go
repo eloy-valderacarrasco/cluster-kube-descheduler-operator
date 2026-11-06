@@ -185,6 +185,14 @@ func (st *softTainter) Reconcile(ctx context.Context, request reconcile.Request)
 				targetThresholds:       nil, // HighNodeUtilization has no target thresholds
 				mode:                   des.Spec.Mode,
 			}
+			// Predictive mode is a dry run: sealing a node removes real
+			// capacity, so it must never happen outside Automatic mode. This
+			// mirrors syncSoftTaints, which gates every taint write on
+			// Automatic.
+			if st.args.mode != desv1.Automatic {
+				logger.Info("Compaction skipped: the descheduler is not in Automatic mode", "mode", st.args.mode)
+				return reconcile.Result{RequeueAfter: st.resyncPeriod}, nil
+			}
 			if err := st.reconcileCompaction(ctx, nodeList); err != nil {
 				logger.Error(err, "compaction reconciliation failed")
 				return reconcile.Result{}, err
@@ -613,13 +621,24 @@ func (st *softTainter) reconcileCompaction(ctx context.Context, nodes []*corev1.
 		ready = append(ready, node)
 	}
 
-	// 2. Never go below the floor.
-	if len(ready) <= minCompactionReadyNodes {
-		log.Info("Compaction paused: not enough ready KubeVirt nodes", "ready", len(ready), "floor", minCompactionReadyNodes)
-		return st.unsealAll(ctx, sealed)
+	// 2. Unseal any sealed node that is no longer below the packing threshold:
+	//    the cluster now needs its capacity back. Unsealing is always safe, so
+	//    this runs before the floor check.
+	if err := st.unsealNodesAboveThreshold(ctx, sealed); err != nil {
+		return err
 	}
 
-	// 3. Sort candidates by usage ascending: the emptiest node is the best
+	// 3. Never go below the floor. This *pauses* compaction: it does not
+	//    unseal the remaining sealed nodes. Those are the drained, empty result
+	//    of the compaction already performed and are awaiting machine removal;
+	//    unsealing them here would restart the compaction on the next pass and
+	//    oscillate forever.
+	if len(ready) <= minCompactionReadyNodes {
+		log.Info("Compaction paused: not enough ready KubeVirt nodes", "ready", len(ready), "floor", minCompactionReadyNodes)
+		return nil
+	}
+
+	// 4. Sort candidates by usage ascending: the emptiest node is the best
 	//    candidate to remove.
 	candidates, err := st.compactionCandidates(ctx, ready)
 	if err != nil {
@@ -627,10 +646,10 @@ func (st *softTainter) reconcileCompaction(ctx context.Context, nodes []*corev1.
 	}
 	if len(candidates) == 0 {
 		log.Info("Compaction: no node below the packing threshold, nothing to seal")
-		return st.unsealAll(ctx, sealed)
+		return nil
 	}
 
-	// 4. Seal at most one node, and only if it is fully drainable.
+	// 5. Seal at most one node, and only if it is fully drainable.
 	for _, candidate := range candidates {
 		drainability, err := st.assessNodeDrainability(ctx, candidate)
 		if err != nil {
@@ -654,15 +673,33 @@ func (st *softTainter) reconcileCompaction(ctx context.Context, nodes []*corev1.
 	return nil
 }
 
-// unsealAll removes the sealed taint from nodes that are no longer candidates.
-func (st *softTainter) unsealAll(ctx context.Context, sealed []*corev1.Node) error {
+// unsealNodesAboveThreshold removes the sealed taint from nodes that are no
+// longer below the compaction packing threshold: their capacity is needed
+// again, and unsealing is always safe.
+func (st *softTainter) unsealNodesAboveThreshold(ctx context.Context, sealed []*corev1.Node) error {
+	if len(sealed) == 0 {
+		return nil
+	}
+	// A sealed node is never a compaction candidate (it is excluded from
+	// "ready"), so compare it against the threshold explicitly.
+	below, err := st.compactionCandidates(ctx, sealed)
+	if err != nil {
+		return err
+	}
+	stillBelow := make(map[string]bool, len(below))
+	for _, node := range below {
+		stillBelow[node.Name] = true
+	}
 	for _, node := range sealed {
+		if stillBelow[node.Name] {
+			continue
+		}
 		removed, err := RemoveTaint(ctx, st.client, node, SealedNodeTaintKey)
 		if err != nil {
 			return err
 		}
 		if removed {
-			log.Info("Compaction: unsealed node", "node", node.Name)
+			log.Info("Compaction: unsealed node, it is no longer below the packing threshold", "node", node.Name)
 		}
 	}
 	return nil
@@ -828,7 +865,7 @@ func (st *softTainter) dropTaint(ctx context.Context, node *corev1.Node, k, v st
 	if err != nil {
 		return err
 	}
-	if taints.TaintExists(rNode.Spec.Taints, &corev1.Taint{Key: k, Value: v, Effect: corev1.TaintEffectPreferNoSchedule}) {
+	if taints.TaintKeyExists(rNode.Spec.Taints, k) {
 		removed, err := RemoveTaint(ctx, st.client, rNode, k)
 		if err != nil {
 			log.Error(err, "Failed removing soft taint from node, check RBAC", "node", rNode.Name, "taint", k)

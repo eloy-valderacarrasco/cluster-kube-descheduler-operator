@@ -189,6 +189,55 @@ func TestAddOrUpdateSoftTaint(t *testing.T) {
 	}
 }
 
+func TestAddOrUpdateTaintWithNoScheduleEffect(t *testing.T) {
+	const testKey = "compaction.descheduler.openshift.io/sealed"
+	const testValue = "true"
+	ctx := context.Background()
+	node := test.BuildTestNode("node1", 1000, 2000, 9, nil)
+
+	scheme := runtime.NewScheme()
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed building scheme for the fake client: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().WithObjects(node).WithScheme(scheme).Build()
+
+	updated, err := AddOrUpdateTaint(ctx, cl, node, testKey, testValue, v1.TaintEffectNoSchedule)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !updated {
+		t.Fatalf("expected the taint to be added")
+	}
+
+	tNode := &v1.Node{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(node), tNode); err != nil {
+		t.Fatalf("test case error: %v", err)
+	}
+	expected := []v1.Taint{{Key: testKey, Value: testValue, Effect: v1.TaintEffectNoSchedule}}
+	less := func(a, b v1.Taint) bool { return a.Key < b.Key }
+	if diff := cmp.Diff(expected, tNode.Spec.Taints, cmpopts.SortSlices(less)); diff != "" {
+		t.Errorf("node should have a NoSchedule taint: %v", diff)
+	}
+
+	// Re-running must be idempotent: no update and no change.
+	updated, err = AddOrUpdateTaint(ctx, cl, node, testKey, testValue, v1.TaintEffectNoSchedule)
+	if err != nil {
+		t.Fatalf("unexpected error on the second call: %v", err)
+	}
+	if updated {
+		t.Errorf("expected the second call to be a no-op")
+	}
+
+	tNode = &v1.Node{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(node), tNode); err != nil {
+		t.Fatalf("test case error: %v", err)
+	}
+	if diff := cmp.Diff(expected, tNode.Spec.Taints, cmpopts.SortSlices(less)); diff != "" {
+		t.Errorf("node taints changed on an idempotent call: %v", diff)
+	}
+}
+
 func TestRemoveSoftTaint(t *testing.T) {
 	const testKey = "testTaintKey"
 	const otherKey1 = "testOtherKey1"

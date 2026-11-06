@@ -881,6 +881,118 @@ func TestManageSoftTainterDeployment(t *testing.T) {
 	}
 }
 
+// TestSoftTainterPredicatesForCompaction pins the deployment gating for the
+// KubeVirtCompactAndScale profile: the soft-tainter must be deployed, but the
+// Prometheus-only resources (cluster-monitoring-view binding and the PSI alert)
+// must not be.
+func TestSoftTainterPredicatesForCompaction(t *testing.T) {
+	ctx, cancelFunc := context.WithCancel(context.TODO())
+	defer cancelFunc()
+
+	tempPSIPath, err := os.MkdirTemp("", "unittest")
+	if err != nil {
+		t.Fatalf("Failed test: %v", err)
+	}
+	defer func(path string) {
+		if err := os.RemoveAll(path); err != nil {
+			t.Fatalf("Failed test: %v", err)
+		}
+	}(tempPSIPath)
+
+	tests := []struct {
+		name                 string
+		descheduler          *deschedulerv1.KubeDescheduler
+		objects              []runtime.Object
+		psiAvailable         bool
+		expectSoftTainter    bool
+		expectPrometheusNeed bool
+	}{
+		{
+			name: "KubeVirtCompactAndScale with KubeVirt: soft-tainter yes, Prometheus no",
+			descheduler: buildKubeDeschedulerSpec(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.DeschedulingIntervalSeconds = utilptr.To[int32](10)
+			}),
+			objects:              makeKubeVirtNodes(),
+			psiAvailable:         false, // compaction needs neither PSI nor Prometheus
+			expectSoftTainter:    true,
+			expectPrometheusNeed: false,
+		},
+		{
+			name: "KubeVirtCompactAndScale without KubeVirt: no soft-tainter",
+			descheduler: buildKubeDeschedulerSpec(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale}
+				spec.DeschedulingIntervalSeconds = utilptr.To[int32](10)
+			}),
+			objects:              nil,
+			psiAvailable:         true,
+			expectSoftTainter:    false,
+			expectPrometheusNeed: false,
+		},
+		{
+			name: "KubeVirtRelieveAndMigrate: both predicates agree",
+			descheduler: buildKubeDeschedulerSpec(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtRelieveAndMigrate}
+				spec.ProfileCustomizations = &deschedulerv1.ProfileCustomizations{
+					DevDeviationThresholds:      &deschedulerv1.LowDeviationThreshold,
+					DevActualUtilizationProfile: deschedulerv1.PrometheusCPUCombinedProfile,
+				}
+				spec.DeschedulingIntervalSeconds = utilptr.To[int32](10)
+			}),
+			objects:              makeKubeVirtNodes(),
+			psiAvailable:         true,
+			expectSoftTainter:    true,
+			expectPrometheusNeed: true,
+		},
+		{
+			name: "LifecycleAndUtilization with no leftovers: neither predicate",
+			descheduler: buildKubeDeschedulerSpec(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.LifecycleAndUtilization}
+				spec.DeschedulingIntervalSeconds = utilptr.To[int32](10)
+			}),
+			objects:              makeKubeVirtNodes(),
+			psiAvailable:         true,
+			expectSoftTainter:    false,
+			expectPrometheusNeed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateDeschedulerCR(tt.descheduler); err != nil {
+				t.Fatalf("Test setup error: invalid descheduler configuration: %v", err)
+			}
+
+			targetConfigReconciler, _ := initTargetConfigReconciler(ctx, tt.objects, nil, nil)
+			if tt.psiAvailable {
+				targetConfigReconciler.psiPath = tempPSIPath
+			} else {
+				targetConfigReconciler.psiPath = path.Join(tempPSIPath, "MISSING")
+			}
+
+			enabled, err := targetConfigReconciler.isSoftTainterNeeded(tt.descheduler)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if enabled != tt.expectSoftTainter {
+				t.Errorf("isSoftTainterNeeded: expected %v, got %v", tt.expectSoftTainter, enabled)
+			}
+
+			promNeeded, err := targetConfigReconciler.isSoftTainterPrometheusNeeded(tt.descheduler)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if promNeeded != tt.expectPrometheusNeed {
+				t.Errorf("isSoftTainterPrometheusNeeded: expected %v, got %v", tt.expectPrometheusNeed, promNeeded)
+			}
+
+			if tt.expectPrometheusNeed && !tt.expectSoftTainter {
+				t.Errorf("inconsistent expectations: Prometheus cannot be needed when the soft-tainter is not deployed")
+			}
+		})
+	}
+}
+
 func TestSync(t *testing.T) {
 	fakeRecorder := NewFakeRecorder(1024)
 
