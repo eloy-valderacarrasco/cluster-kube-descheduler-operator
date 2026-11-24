@@ -7,12 +7,20 @@ profiles:
 - name: KubeVirtCompactAndScale
   pluginConfig:
   - args:
+      evictableNamespaces:
+        exclude:
+        - kube-system
+        - hypershift
+        - openshift
+        - openshift-kube-descheduler-operator
+        - openshift-kube-scheduler
       thresholds:
         cpu: 20
         memory: 20
         pods: 20
     name: HighNodeUtilization
   - args:
+      evictLocalStoragePods: true
       noEvictionPolicy: Mandatory
       nodeFit: true
       podProtections: {}

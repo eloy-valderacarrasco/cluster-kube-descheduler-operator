@@ -104,6 +104,18 @@ func BuildDeschedulingPolicy(descheduler *deschedulerv1.KubeDescheduler, protect
 		}
 	}
 
+	// The KubeVirt compaction profile treats local storage as evictable by
+	// default, matching KubeVirtRelieveAndMigrate. Every virt-launcher pod
+	// carries several emptyDir volumes as scratch space, and KubeVirt
+	// regenerates them on the target node during a live migration, so
+	// emptyDir never blocks a migration. KubevirtMigrationAware remains the
+	// authoritative guard: it rejects VMIs that report LiveMigratable=False,
+	// so a VMI is still never evicted when it cannot actually be migrated.
+	// This makes EvictPodsWithLocalStorage redundant for this profile.
+	if hasKubeVirtCompactAndScaleProfile(descheduler.Spec.Profiles) {
+		evictLocalStoragePods = true
+	}
+
 	for _, profileName := range descheduler.Spec.Profiles {
 		var profile *v1alpha2.DeschedulerProfile
 		var err error
@@ -129,7 +141,11 @@ func BuildDeschedulingPolicy(descheduler *deschedulerv1.KubeDescheduler, protect
 		case deschedulerv1.KubeVirtCompactAndScale:
 			kubeVirtSchedulable := kubeVirtShedulableLabelSelector
 			policy.NodeSelector = &kubeVirtSchedulable
-			profile, err = kubeVirtCompactAndScaleProfile(descheduler.Spec.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces)
+			// A VMI's PVC is its disk and is live-migratable, so this profile
+			// keeps PVC pods evictable: the generic ignorePvcPods default of
+			// true exists to protect non-KubeVirt PVC workloads and would
+			// disable VM migration entirely here.
+			profile, err = kubeVirtCompactAndScaleProfile(descheduler.Spec.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces, false, evictLocalStoragePods)
 		default:
 			err = fmt.Errorf("Profile %q not recognized", profileName)
 		}
@@ -652,7 +668,7 @@ func kubeVirtRelieveAndMigrateProfile(profileCustomizations *deschedulerv1.Profi
 	return profile, nil
 }
 
-func kubeVirtCompactAndScaleProfile(profileCustomizations *deschedulerv1.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces []string) (*v1alpha2.DeschedulerProfile, error) {
+func kubeVirtCompactAndScaleProfile(profileCustomizations *deschedulerv1.ProfileCustomizations, includedNamespaces, excludedNamespaces, protectedNamespaces []string, ignorePVCPods, evictLocalStoragePods bool) (*v1alpha2.DeschedulerProfile, error) {
 	profile := &v1alpha2.DeschedulerProfile{
 		Name: string(deschedulerv1.KubeVirtCompactAndScale),
 		PluginConfigs: []v1alpha2.PluginConfig{
@@ -673,10 +689,15 @@ func kubeVirtCompactAndScaleProfile(profileCustomizations *deschedulerv1.Profile
 				Args: runtime.RawExtension{
 					Object: &defaultevictor.DefaultEvictorArgs{
 						// VMs on shared storage can live-migrate, so PVC pods are
-						// evictable. Pods with local storage cannot migrate; evicting
-						// them would restart the VM instead of moving it.
-						IgnorePvcPods:         false,
-						EvictLocalStoragePods: false,
+						// evictable (ignorePvcPods=false). Local storage (emptyDir)
+						// is regenerated on the target node by KubeVirt during a live
+						// migration, so it does not make a VMI non-migratable; only
+						// hostPath does. evictLocalStoragePods is therefore true by
+						// default, matching KubeVirtRelieveAndMigrate, and
+						// KubevirtMigrationAware remains the authoritative guard: it
+						// rejects VMIs reporting LiveMigratable=False.
+						IgnorePvcPods:         ignorePVCPods,
+						EvictLocalStoragePods: evictLocalStoragePods,
 						NoEvictionPolicy:      defaultevictor.MandatoryNoEvictionPolicy,
 						NodeFit:               true,
 					},
@@ -713,7 +734,18 @@ func kubeVirtCompactAndScaleProfile(profileCustomizations *deschedulerv1.Profile
 	// exclude openshift namespaces from descheduling
 	if len(includedNamespaces) > 0 || len(excludedNamespaces) > 0 {
 		if len(includedNamespaces) > 0 {
-			klog.Warning("HighNodeUtilization is enabled, however it does not support namespace inclusion. Namespace inclusion will only be considered by other strategies.")
+			klog.Warning("HighNodeUtilization is enabled, however it does not support namespace inclusion. Namespace inclusion will only be considered by other strategies. Falling back to a list of excluded protected namespaces.")
+			// HighNodeUtilization cannot honour an inclusion list, so fall back
+			// to the protected namespaces exactly like
+			// setExcludedNamespacesForLowNodeUtilizationPlugin does for the
+			// LowNodeUtilization-based profiles. Without this the plugin would
+			// end up with no namespace filter at all and could evict from the
+			// protected namespaces.
+			if len(excludedNamespaces) == 0 {
+				profile.PluginConfigs[0].Args.Object.(*nodeutilization.HighNodeUtilizationArgs).EvictableNamespaces = &deschedulerapi.Namespaces{
+					Exclude: protectedNamespaces,
+				}
+			}
 		}
 		if len(excludedNamespaces) > 0 {
 			profile.PluginConfigs[0].Args.Object.(*nodeutilization.HighNodeUtilizationArgs).EvictableNamespaces = &deschedulerapi.Namespaces{

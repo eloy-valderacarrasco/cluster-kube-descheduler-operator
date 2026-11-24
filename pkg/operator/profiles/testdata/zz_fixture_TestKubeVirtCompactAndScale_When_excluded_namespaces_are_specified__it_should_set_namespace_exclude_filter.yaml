@@ -21,6 +21,7 @@ profiles:
         pods: 20
     name: HighNodeUtilization
   - args:
+      evictLocalStoragePods: true
       noEvictionPolicy: Mandatory
       nodeFit: true
       podProtections: {}

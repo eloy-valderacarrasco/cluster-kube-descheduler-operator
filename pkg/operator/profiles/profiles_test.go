@@ -1297,6 +1297,24 @@ func TestKubeVirtCompactAndScale(t *testing.T) {
 			expectError:      true,
 			expectedErrorMsg: "It is invalid to set both .spec.profileCustomizations.thresholdPriority and .spec.profileCustomizations.ThresholdPriorityClassName fields",
 		},
+		{
+			name: "When EvictPodsWithLocalStorage is enabled, it should set evictLocalStoragePods to true",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale, deschedulerv1.EvictPodsWithLocalStorage}
+			}),
+		},
+		{
+			name: "When EvictPodsWithPVC is enabled, it should keep PVC pods evictable",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale, deschedulerv1.EvictPodsWithPVC}
+			}),
+		},
+		{
+			name: "When both storage modifiers are enabled, it should evict PVC and local storage pods",
+			descheduler: buildKubeDescheduler(func(spec *deschedulerv1.KubeDeschedulerSpec) {
+				spec.Profiles = []deschedulerv1.DeschedulerProfile{deschedulerv1.KubeVirtCompactAndScale, deschedulerv1.EvictPodsWithPVC, deschedulerv1.EvictPodsWithLocalStorage}
+			}),
+		},
 	}
 
 	for _, tt := range tests {
