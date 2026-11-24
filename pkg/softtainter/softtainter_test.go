@@ -584,6 +584,12 @@ func TestReconcileCompaction(t *testing.T) {
 		Name:         "scratch",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}
+	hostPathVolume := corev1.Volume{
+		Name: "host",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/foo"},
+		},
+	}
 	pvcVolume := corev1.Volume{
 		Name: "disk",
 		VolumeSource: corev1.VolumeSource{
@@ -644,20 +650,38 @@ func TestReconcileCompaction(t *testing.T) {
 			expectAtMostOneSeal: true,
 		},
 		{
-			description: "least utilized candidate has local storage: skip it and seal the next one",
+			description: "least utilized candidate has a hostPath pod: skip it and seal the next one",
 			nodes: []*corev1.Node{
 				buildCompactionNode("node1", "8", "16Gi", 110),
 				buildCompactionNode("node2", "8", "16Gi", 110),
 				buildCompactionNode("node3", "8", "16Gi", 110),
 			},
 			pods: []*corev1.Pod{
-				// node1 is the emptiest but holds a VM with an emptyDir.
-				buildCompactionPod("blocker", "node1", "10m", "10Mi", emptyDirVolume),
+				// node1 is the emptiest but holds a pod pinned by hostPath.
+				buildCompactionPod("blocker", "node1", "10m", "10Mi", hostPathVolume),
 				buildCompactionPod("p2", "node2", "100m", "100Mi", pvcVolume),
 				buildCompactionPod("p3", "node3", "200m", "200Mi", pvcVolume),
 			},
 			testfile:            "policyWithKubeVirtCompactAndScale.yaml",
 			expectedSealed:      []string{"node2"},
+			expectAtMostOneSeal: true,
+		},
+		{
+			description: "least utilized candidate holds a virt-launcher with emptyDir: it is sealed",
+			nodes: []*corev1.Node{
+				buildCompactionNode("node1", "8", "16Gi", 110),
+				buildCompactionNode("node2", "8", "16Gi", 110),
+				buildCompactionNode("node3", "8", "16Gi", 110),
+			},
+			pods: []*corev1.Pod{
+				// A real virt-launcher carries emptyDir scratch alongside its
+				// PVC disks; that must not block sealing the node.
+				buildCompactionPod("virt-launcher", "node1", "10m", "10Mi", emptyDirVolume, pvcVolume),
+				buildCompactionPod("p2", "node2", "100m", "100Mi", pvcVolume),
+				buildCompactionPod("p3", "node3", "200m", "200Mi", pvcVolume),
+			},
+			testfile:            "policyWithKubeVirtCompactAndScale.yaml",
+			expectedSealed:      []string{"node1"},
 			expectAtMostOneSeal: true,
 		},
 		{
@@ -1049,12 +1073,12 @@ func TestAssessNodeDrainability(t *testing.T) {
 		expectedBlocked    int
 	}{
 		{
-			description: "pod with an emptyDir cannot be migrated",
+			description: "pod with an emptyDir is still migratable, KubeVirt regenerates it on the target",
 			pods: []*corev1.Pod{
 				buildCompactionPod("vm", "node1", "100m", "100Mi", emptyDirVolume),
 			},
-			expectedMigratable: 0,
-			expectedBlocked:    1,
+			expectedMigratable: 1,
+			expectedBlocked:    0,
 		},
 		{
 			description: "pod with only a PVC can be live-migrated",
@@ -1076,11 +1100,19 @@ func TestAssessNodeDrainability(t *testing.T) {
 			description: "mixed pods on the same node",
 			pods: []*corev1.Pod{
 				buildCompactionPod("migratable", "node1", "100m", "100Mi", pvcVolume),
-				buildCompactionPod("blocked", "node1", "100m", "100Mi", emptyDirVolume),
+				buildCompactionPod("blocked", "node1", "100m", "100Mi", hostPathVolume),
 				buildCompactionPod("elsewhere", "node2", "100m", "100Mi", emptyDirVolume),
 			},
 			expectedMigratable: 1,
 			expectedBlocked:    1,
+		},
+		{
+			description: "a real virt-launcher pod (PVC plus emptyDir scratch) is migratable",
+			pods: []*corev1.Pod{
+				buildCompactionPod("virt-launcher-vm", "node1", "200m", "4Gi", emptyDirVolume, emptyDirVolume, emptyDirVolume, pvcVolume),
+			},
+			expectedMigratable: 1,
+			expectedBlocked:    0,
 		},
 	}
 

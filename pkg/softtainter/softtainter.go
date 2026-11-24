@@ -449,8 +449,8 @@ type nodeDrainability struct {
 	// migratablePods counts pods that can move elsewhere: pods with PVCs
 	// (live-migratable VMs) and ordinary pods.
 	migratablePods int
-	// blockedPods counts pods that cannot move: pods with local storage,
-	// which would restart rather than migrate.
+	// blockedPods counts pods that cannot move: pods pinned to the node by
+	// hostPath storage.
 	blockedPods int
 	// reason is a short human-readable explanation for logs and events.
 	reason string
@@ -466,8 +466,6 @@ func (st *softTainter) assessNodeDrainability(ctx context.Context, node *corev1.
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		// Mirror the eviction policy from plan 001: pods with local storage
-		// cannot live-migrate, so they must not be stranded on a sealed node.
 		if hasLocalStorage(pod) {
 			result.blockedPods++
 			continue
@@ -475,16 +473,20 @@ func (st *softTainter) assessNodeDrainability(ctx context.Context, node *corev1.
 		result.migratablePods++
 	}
 	if result.blockedPods > 0 {
-		result.reason = fmt.Sprintf("%d pod(s) with local storage cannot be migrated", result.blockedPods)
+		result.reason = fmt.Sprintf("%d pod(s) with hostPath storage cannot be migrated", result.blockedPods)
 	}
 	return result, nil
 }
 
-// hasLocalStorage reports whether the pod uses an emptyDir or hostPath volume,
-// matching the descheduler's own local-storage protection.
+// hasLocalStorage reports whether the pod is pinned to its node by hostPath
+// storage. emptyDir is deliberately excluded: it is node-local scratch space
+// that KubeVirt regenerates on the target node during a live migration, so a
+// VMI backed by emptyDir migrates fine. Every virt-launcher pod carries
+// several emptyDir volumes, so treating emptyDir as unmigratable would make
+// every KubeVirt node undrainable and the compactor would never seal one.
 func hasLocalStorage(pod *corev1.Pod) bool {
 	for _, volume := range pod.Spec.Volumes {
-		if volume.EmptyDir != nil || volume.HostPath != nil {
+		if volume.HostPath != nil {
 			return true
 		}
 	}
